@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:sborapps/core/services/admin_auth_service.dart';
 
 class PickerDrawer extends StatelessWidget {
   final String pickerName;
   final Function(String) onNameChanged;
   final VoidCallback onOrdersTap;
   final VoidCallback onHistoryTap;
+  final VoidCallback onProfileTap;
 
   const PickerDrawer({
     Key? key,
@@ -12,6 +14,7 @@ class PickerDrawer extends StatelessWidget {
     required this.onNameChanged,
     required this.onOrdersTap,
     required this.onHistoryTap,
+    required this.onProfileTap,
   }) : super(key: key);
 
   @override
@@ -19,6 +22,7 @@ class PickerDrawer extends StatelessWidget {
     return Drawer(
       child: Column(
         children: [
+          // ✅ Header с информацией
           Container(
             height: 260,
             width: double.infinity,
@@ -87,7 +91,7 @@ class PickerDrawer extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'Онлайн',
+                        'Сборщик заказов',
                         style: TextStyle(
                           color: Colors.white.withOpacity(0.9),
                           fontSize: 13,
@@ -113,13 +117,18 @@ class PickerDrawer extends StatelessWidget {
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(18),
                       ),
-                      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 8,
+                        horizontal: 12,
+                      ),
                     ),
                   ),
                 ),
               ],
             ),
           ),
+
+          // ✅ Меню элементы
           Expanded(
             child: ListView(
               padding: EdgeInsets.zero,
@@ -146,6 +155,15 @@ class PickerDrawer extends StatelessWidget {
                 ),
                 const Divider(height: 1),
                 _buildMenuItem(
+                  icon: Icons.person,
+                  title: 'Профиль администратора',
+                  onTap: () {
+                    Navigator.pop(context);
+                    onProfileTap();
+                  },
+                  highlight: true,
+                ),
+                _buildMenuItem(
                   icon: Icons.settings_rounded,
                   title: 'Настройки',
                   onTap: () {},
@@ -158,6 +176,8 @@ class PickerDrawer extends StatelessWidget {
               ],
             ),
           ),
+
+          // ✅ Выход внизу
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(16),
@@ -168,7 +188,7 @@ class PickerDrawer extends StatelessWidget {
               ),
             ),
             child: InkWell(
-              onTap: () => Navigator.pop(context),
+              onTap: () => _showLogoutDialog(context),
               borderRadius: BorderRadius.circular(12),
               child: Padding(
                 padding: const EdgeInsets.all(12),
@@ -211,26 +231,36 @@ class PickerDrawer extends StatelessWidget {
     required IconData icon,
     required String title,
     required VoidCallback onTap,
+    bool highlight = false,
   }) {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
-      child: Padding(
+      child: Container(
+        color: highlight ? Colors.blue[50] : Colors.transparent,
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
         child: Row(
           children: [
-            Icon(icon, color: Colors.grey[700], size: 24),
+            Icon(
+              icon,
+              color: highlight ? Colors.blue[600] : Colors.grey[700],
+              size: 24,
+            ),
             const SizedBox(width: 16),
             Expanded(
               child: Text(
                 title,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.w500,
+                  color: highlight ? Colors.blue[600] : Colors.black,
                 ),
               ),
             ),
-            Icon(Icons.chevron_right, color: Colors.grey[400]),
+            Icon(
+              Icons.chevron_right,
+              color: highlight ? Colors.blue[600] : Colors.grey[400],
+            ),
           ],
         ),
       ),
@@ -275,8 +305,8 @@ class PickerDrawer extends StatelessWidget {
             onPressed: () {
               if (controller.text.trim().isNotEmpty) {
                 onNameChanged(controller.text.trim());
+                Navigator.pop(context);
               }
-              Navigator.pop(context);
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.blue[600],
@@ -286,6 +316,49 @@ class PickerDrawer extends StatelessWidget {
               ),
             ),
             child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showLogoutDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Выход из системы'),
+        content: const Text('Вы уверены, что хотите выйти?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Отмена'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              try {
+                await AdminAuthService.logout();
+                if (context.mounted) {
+                  Navigator.pop(context); // закрыть диалог
+                  Navigator.pop(context); // закрыть drawer
+                  Navigator.pushNamedAndRemoveUntil(
+                    context,
+                    '/login',
+                        (route) => false,
+                  );
+                }
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Ошибка выхода: $e')),
+                  );
+                }
+              }
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red[500],
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Выход'),
           ),
         ],
       ),
