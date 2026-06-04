@@ -36,7 +36,14 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   Future<void> _updateItemStatus(OrderItem item, bool value) async {
     if (_order == null) return;
 
-    // ✅ Оптимистичное обновление — сначала меняем UI, потом ждём сервер
+    // ✅ Сохраняем состояние локально (очень быстро, без ожидания сети)
+    await instance.saveState(CollectedState(
+      orderId: _order!.id,
+      itemId: item.id,
+      isCollected: value,
+    ));
+
+    // Оптимистичное обновление UI — сначала меняем отображение, потом ждём сервер
     final index = _items.indexWhere((e) => e.id == item.id);
     if (index == -1) return;
 
@@ -51,9 +58,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            value
-                ? '✓ ${item.productName} собран'
-                : '✗ ${item.productName} убран',
+            value ? '✓ ${item.productName} собран' : '✗ ${item.productName} убран',
           ),
           duration: const Duration(seconds: 1),
           behavior: SnackBarBehavior.floating,
@@ -73,6 +78,60 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
+    }
+  }
+
+
+  Future<void> _prepareOrder() async {
+    if (_order == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Отправить на доставку?'),
+        content: const Text(
+          'Заказ будет отмечен как готов к доставке.\n'
+              'Доставщик сможет забрать посылку.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отмена'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Продолжить'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    setState(() => _isLoading = true);
+
+    try {
+      await ApiService.updateOrderStatus(_order!.id, 'ready');
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✓ Заказ готов к доставке!'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Ошибка: $e'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -400,10 +459,14 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     return Padding(
       padding: const EdgeInsets.all(16),
       child: ElevatedButton(
-        onPressed: (allCollected && !_isLoading) ? _completeOrder : null,
+        onPressed: (allCollected && !_isLoading && _order?.status != 'packed')
+            ? _prepareOrder
+            : null,
         style: ElevatedButton.styleFrom(
           minimumSize: const Size(double.infinity, 52),
-          backgroundColor: allCollected ? Colors.green : null,
+          backgroundColor: allCollected && _order?.status != 'packed'
+              ? Colors.green
+              : null,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),
@@ -421,12 +484,16 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(
-              allCollected ? Icons.check_circle : Icons.pending_actions,
+              allCollected ? Icons.local_shipping : Icons.pending_actions,
             ),
             const SizedBox(width: 8),
             Text(
-              allCollected ? 'Завершить сборку' : 'Собрать все товары',
-              style: const TextStyle(fontSize: 16),
+              _order?.status == 'packed'
+                  ? 'Заказ завершён'
+                  : (allCollected
+                  ? 'Готов к доставке'
+                  : 'Собрать все товары'),
+              style: TextStyle(fontSize: 16),
             ),
           ],
         ),
