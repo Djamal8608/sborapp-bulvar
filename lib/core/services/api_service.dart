@@ -48,6 +48,9 @@ class ApiService {
       _checkResponse(response);
 
       final data = jsonDecode(response.body);
+      if (data is Map && data['delivery_gateway_sent'] == false) {
+        throw ApiException('Заказ упакован, но шлюз доставки его не принял');
+      }
       final List ordersJson = data['orders'] ?? [];
       return ordersJson
           .map((json) => Order.fromJson(json as Map<String, dynamic>))

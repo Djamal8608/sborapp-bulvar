@@ -112,7 +112,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     setState(() => _isLoading = true);
 
     try {
-      await ApiService.updateOrderStatus(_order!.id, 'ready');
+      await ApiService.updateOrderStatus(_order!.id, 'packed');
 
       if (!mounted) return;
 
