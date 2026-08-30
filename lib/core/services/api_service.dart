@@ -20,7 +20,6 @@ class ApiService {
     };
   }
 
-  // ✅ Единый обработчик ответа — больше не дублируем код в каждом методе
   static void _checkResponse(http.Response response) async {
     if (response.statusCode == 401) {
       await AdminAuthService.logout();
@@ -36,7 +35,6 @@ class ApiService {
     }
   }
 
-  /// Получить активные заказы для сборщика
   static Future<List<Order>> getOrders() async {
     try {
       final headers = await _buildHeaders();
@@ -62,7 +60,6 @@ class ApiService {
     }
   }
 
-  /// Получить детали заказа со всеми товарами
   static Future<Order> getOrderDetail(int orderId) async {
     try {
       final headers = await _buildHeaders();
@@ -84,7 +81,6 @@ class ApiService {
     }
   }
 
-  /// Обновить статус заказа
   static Future<void> updateOrderStatus(int orderId, String status) async {
     try {
       final headers = await _buildHeaders();
@@ -105,7 +101,6 @@ class ApiService {
     }
   }
 
-  /// Обновить статус отдельного товара в заказе
   static Future<void> updateItemStatus(
       int orderId,
       int itemId,
@@ -131,7 +126,30 @@ class ApiService {
     }
   }
 
-  /// Получить историю заказов
+  static Future<ScanResult> scanItem(int orderId, String barcode) async {
+    try {
+      final headers = await _buildHeaders();
+      final response = await http.post(
+        Uri.parse('$_baseUrl/orders_api.php?action=scan_item'),
+        headers: headers,
+        body: jsonEncode({
+          'order_id': orderId,
+          'barcode': barcode,
+        }),
+      ).timeout(_timeout);
+
+      _checkResponse(response);
+
+      return ScanResult.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>,
+      );
+    } on ApiException {
+      rethrow;
+    } catch (e) {
+      throw ApiException('Нет соединения с сервером: $e');
+    }
+  }
+
   static Future<HistoryResponse> getOrderHistory({
     int limit = 50,
     int offset = 0,
@@ -156,7 +174,6 @@ class ApiService {
     }
   }
 
-  /// Получить статистику по заказам
   static Future<Statistics> getStatistics({
     String period = 'today',
   }) async {
@@ -200,6 +217,49 @@ class ApiException implements Exception {
 // Models
 // ============================================
 
+class ScanResult {
+
+  final bool found;
+
+  final bool already;
+
+  final String reason;
+
+  final String message;
+  final String productName;
+  final int? itemId;
+  final int itemsCount;
+  final int collectedCount;
+  final int progress;
+
+  const ScanResult({
+    required this.found,
+    required this.already,
+    required this.reason,
+    required this.message,
+    required this.productName,
+    required this.itemId,
+    required this.itemsCount,
+    required this.collectedCount,
+    required this.progress,
+  });
+
+  factory ScanResult.fromJson(Map<String, dynamic> json) {
+    return ScanResult(
+      found: json['found'] == true,
+      already: json['already'] == true,
+      reason: json['reason']?.toString() ?? '',
+      message: json['message']?.toString() ?? '',
+      productName: json['product_name']?.toString() ?? '',
+      itemId: json['item_id'] is int ? json['item_id'] as int : null,
+      itemsCount: json['items_count'] is int ? json['items_count'] as int : 0,
+      collectedCount:
+      json['collected_count'] is int ? json['collected_count'] as int : 0,
+      progress: json['progress'] is int ? json['progress'] as int : 0,
+    );
+  }
+}
+
 class Order {
   final int id;
   final String customerName;
@@ -209,6 +269,9 @@ class Order {
   final double bonusEarned;
   final String deliveryStatus;
   final String paymentStatus;
+  final String paymentMethod;
+  final bool isPaidOnline;
+  final String _paymentState;
   final String address;
   final List<OrderItem> items;
   final DateTime createdAt;
@@ -225,13 +288,44 @@ class Order {
     this.bonusEarned = 0,
     required this.deliveryStatus,
     required this.paymentStatus,
+    this.paymentMethod = 'cash',
+    this.isPaidOnline = false,
+    String paymentState = 'on_delivery',
     required this.address,
     this.items = const [],
     required this.createdAt,
     this.itemsCount,
     this.collectedCount,
     this.progress,
-  });
+  }) : _paymentState = paymentState;
+
+  String get paymentState => _paymentState;
+
+  bool get isAwaitingPayment => _paymentState == 'awaiting_payment';
+
+  String get paymentLabel {
+    switch (_paymentState) {
+      case 'paid_online':
+        return 'Оплачен онлайн';
+      case 'awaiting_payment':
+        return 'Ожидает оплаты';
+      default:
+        return 'Оплата при получении';
+    }
+  }
+
+  String get paymentHint {
+    switch (_paymentState) {
+      case 'paid_online':
+        return 'Деньги с клиента не брать';
+      case 'awaiting_payment':
+        return 'Оплата ещё не подтверждена — не выдавать';
+      default:
+        return 'Взять с клиента ₽${totalPrice.toStringAsFixed(2)}';
+    }
+  }
+
+  double get amountToCollect => isPaidOnline ? 0 : totalPrice;
 
   factory Order.fromJson(Map<String, dynamic> json) {
     final rawItems = json['items'] as List? ?? [];
@@ -244,6 +338,9 @@ class Order {
       bonusEarned: _parseDouble(json['bonus_earned']),
       deliveryStatus: json['delivery_status'] ?? 'new',
       paymentStatus: json['payment_status'] ?? 'pending',
+      paymentMethod: json['payment_method']?.toString() ?? 'cash',
+      isPaidOnline: json['is_paid_online'] == true,
+      paymentState: json['payment_state']?.toString() ?? 'on_delivery',
       address: json['address'] ?? '',
       items: rawItems
           .map((x) => OrderItem.fromJson(x as Map<String, dynamic>))
@@ -257,7 +354,6 @@ class Order {
     );
   }
 
-  // Геттер для совместимости если где-то используется order.status
   String get status => deliveryStatus;
 
   // ✅ Безопасные геттеры без null
@@ -282,6 +378,8 @@ class Order {
     double? bonusEarned,
     String? deliveryStatus,
     String? paymentStatus,
+    String? paymentMethod,
+    bool? isPaidOnline,
     String? address,
     List<OrderItem>? items,
     DateTime? createdAt,
@@ -298,6 +396,9 @@ class Order {
       bonusEarned: bonusEarned ?? this.bonusEarned,
       deliveryStatus: deliveryStatus ?? this.deliveryStatus,
       paymentStatus: paymentStatus ?? this.paymentStatus,
+      paymentMethod: paymentMethod ?? this.paymentMethod,
+      isPaidOnline: isPaidOnline ?? this.isPaidOnline,
+      paymentState: _paymentState,
       address: address ?? this.address,
       items: items ?? this.items,
       createdAt: createdAt ?? this.createdAt,

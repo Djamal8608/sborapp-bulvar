@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:sborapps/core/services/api_service.dart';
 import 'package:sborapps/core/order_state_provider.dart';
+import 'package:sborapps/ui/screens/scanner_screen.dart';
 
 class OrderDetailScreen extends StatefulWidget {
   final int orderId;
@@ -15,36 +16,58 @@ class OrderDetailScreen extends StatefulWidget {
 }
 
 class _OrderDetailScreenState extends State<OrderDetailScreen> {
-  late Future<Order> _orderFuture;
   Order? _order;
   List<OrderItem> _items = [];
   bool _isLoading = false;
-  bool _itemsLoaded = false; // ✅ защита от перезаписи при rebuild
+  bool _isInitialLoading = true;
+  String? _loadError;
 
   @override
   void initState() {
     super.initState();
-    _orderFuture = ApiService.getOrderDetail(widget.orderId);
+    _loadOrder();
   }
 
-  Future<void> _reloadOrder() async {
-    setState(() {
-      _itemsLoaded = false; // ✅ сбрасываем флаг чтобы получить свежие данные
-      _orderFuture = ApiService.getOrderDetail(widget.orderId);
-    });
+  Future<void> _loadOrder() async {
+    final isInitialLoad = _order == null;
+
+    try {
+      final order = await ApiService.getOrderDetail(widget.orderId);
+      if (!mounted) return;
+      setState(() {
+        _order = order;
+        _items = List<OrderItem>.from(order.items);
+        _isInitialLoading = false;
+        _loadError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      if (isInitialLoad) {
+        setState(() {
+          _isInitialLoading = false;
+          _loadError = e.toString();
+        });
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Не удалось обновить: $e'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _updateItemStatus(OrderItem item, bool value) async {
     if (_order == null) return;
 
-    // ✅ Сохраняем состояние локально (очень быстро, без ожидания сети)
     await instance.saveState(CollectedState(
       orderId: _order!.id,
       itemId: item.id,
       isCollected: value,
     ));
 
-    // Оптимистичное обновление UI — сначала меняем отображение, потом ждём сервер
     final index = _items.indexWhere((e) => e.id == item.id);
     if (index == -1) return;
 
@@ -66,7 +89,6 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         ),
       );
     } catch (e) {
-      // ✅ Если ошибка — откатываем изменение обратно
       if (!mounted) return;
       setState(() {
         _items[index] = _items[index].copyWith(isCollected: !value);
@@ -82,6 +104,61 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     }
   }
 
+  Future<void> _openScanner() async {
+    if (_order == null) return;
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ScannerScreen(
+          title: 'Сборка заказа #${_order!.id}',
+          onScan: _handleScan,
+        ),
+      ),
+    );
+
+    if (!mounted) return;
+    await _loadOrder();
+  }
+
+  Future<ScanFeedback> _handleScan(String barcode) async {
+    final order = _order;
+    if (order == null) {
+      return const ScanFeedback(ok: false, text: 'Заказ не загружен');
+    }
+
+    final result = await ApiService.scanItem(order.id, barcode);
+
+    if (!result.found) {
+      final text = result.reason == 'unknown_barcode'
+          ? 'Штрихкод не найден в каталоге'
+          : 'Не из этого заказа${result.productName.isNotEmpty ? ': ${result.productName}' : ''}';
+      return ScanFeedback(ok: false, text: text);
+    }
+
+    if (result.itemId != null && mounted) {
+      final index = _items.indexWhere((e) => e.id == result.itemId);
+      if (index != -1) {
+        setState(() {
+          _items[index] = _items[index].copyWith(isCollected: true);
+        });
+      }
+    }
+
+    final suffix = ' — собрано ${result.collectedCount} из ${result.itemsCount}';
+
+    if (result.already) {
+      return ScanFeedback(
+        ok: true,
+        text: 'Уже отмечено: ${result.productName}$suffix',
+      );
+    }
+
+    return ScanFeedback(
+      ok: true,
+      text: '${result.productName}$suffix',
+    );
+  }
 
   Future<void> _prepareOrder() async {
     if (_order == null) return;
@@ -198,53 +275,104 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         title: Text('Заказ #${widget.orderId}'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.qr_code_scanner),
+            onPressed: _order != null ? _openScanner : null,
+            tooltip: 'Сканировать',
+          ),
+          IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _reloadOrder,
+            onPressed: _loadOrder,
             tooltip: 'Обновить',
           ),
         ],
       ),
-      body: FutureBuilder<Order>(
-        future: _orderFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting &&
-              !_itemsLoaded) {
-            return const Center(child: CircularProgressIndicator());
-          }
+      body: _buildBody(),
+    );
+  }
 
-          if (snapshot.hasError && !_itemsLoaded) {
-            return _buildErrorWidget(snapshot.error.toString());
-          }
+  Widget _buildBody() {
+    if (_isInitialLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
 
-          final order = snapshot.data;
-          if (order == null && !_itemsLoaded) {
-            return const Center(child: Text('Заказ не найден'));
-          }
+    if (_loadError != null) {
+      return _buildErrorWidget(_loadError!);
+    }
 
-          // ✅ Записываем order и items ТОЛЬКО ОДИН РАЗ при первой загрузке
-          if (order != null && !_itemsLoaded) {
-            _order = order;
-            _items = List<OrderItem>.from(order.items);
-            _itemsLoaded = true;
-          }
+    final order = _order;
+    if (order == null) {
+      return const Center(child: Text('Заказ не найден'));
+    }
 
-          if (_order == null) {
-            return const Center(child: CircularProgressIndicator());
-          }
+    final collectedCount = _items.where((e) => e.isCollected).length;
+    final totalCount = _items.length;
+    final allCollected = totalCount > 0 && collectedCount == totalCount;
+    final progressValue = totalCount > 0 ? collectedCount / totalCount : 0.0;
 
-          final collectedCount = _items.where((e) => e.isCollected).length;
-          final totalCount = _items.length;
-          final allCollected = totalCount > 0 && collectedCount == totalCount;
-          final progressValue = totalCount > 0 ? collectedCount / totalCount : 0.0;
+    return Column(
+      children: [
+        _buildOrderInfoCard(collectedCount, totalCount, progressValue),
+        Expanded(child: _buildItemsList()),
+        _buildCompleteButton(allCollected),
+      ],
+    );
+  }
 
-          return Column(
-            children: [
-              _buildOrderInfoCard(collectedCount, totalCount, progressValue),
-              Expanded(child: _buildItemsList()),
-              _buildCompleteButton(allCollected),
-            ],
-          );
-        },
+  Widget _buildPaymentBanner() {
+    final order = _order;
+    if (order == null) return const SizedBox.shrink();
+
+    final MaterialColor color;
+    final IconData icon;
+
+    switch (order.paymentState) {
+      case 'paid_online':
+        color = Colors.green;
+        icon = Icons.verified;
+        break;
+      case 'awaiting_payment':
+        color = Colors.red;
+        icon = Icons.hourglass_empty;
+        break;
+      default:
+        color = Colors.orange;
+        icon = Icons.payments_outlined;
+    }
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.5)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color.shade800, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  order.paymentLabel,
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
+                    color: color.shade800,
+                  ),
+                ),
+                Text(
+                  order.paymentHint,
+                  style: TextStyle(fontSize: 13, color: color.shade800),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -270,7 +398,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             ),
             const SizedBox(height: 24),
             ElevatedButton.icon(
-              onPressed: _reloadOrder,
+              onPressed: _loadOrder,
               icon: const Icon(Icons.refresh),
               label: const Text('Повторить'),
             ),
@@ -296,6 +424,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            _buildPaymentBanner(),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
