@@ -20,7 +20,10 @@ class ApiService {
     };
   }
 
-  static void _checkResponse(http.Response response) async {
+  // Future<void>, а не void: у `void ... async` бросок улетает в отдельный
+  // микротаск — try/catch вызывающего его не ловит, и код идёт дальше
+  // парсить пустое тело ответа.
+  static Future<void> _checkResponse(http.Response response) async {
     if (response.statusCode == 401) {
       await AdminAuthService.logout();
       throw ApiException('Сессия истекла, требуется переавторизация', 401);
@@ -43,7 +46,7 @@ class ApiService {
         headers: headers,
       ).timeout(_timeout);
 
-      _checkResponse(response);
+      await _checkResponse(response);
 
       final data = jsonDecode(response.body);
       if (data is Map && data['delivery_gateway_sent'] == false) {
@@ -70,7 +73,7 @@ class ApiService {
         headers: headers,
       ).timeout(_timeout);
 
-      _checkResponse(response);
+      await _checkResponse(response);
 
       final json = jsonDecode(response.body);
       return Order.fromJson(json as Map<String, dynamic>);
@@ -93,7 +96,7 @@ class ApiService {
         }),
       ).timeout(_timeout);
 
-      _checkResponse(response);
+      await _checkResponse(response);
     } on ApiException {
       rethrow;
     } catch (e) {
@@ -118,7 +121,38 @@ class ApiService {
         }),
       ).timeout(_timeout);
 
-      _checkResponse(response);
+      await _checkResponse(response);
+    } on ApiException {
+      rethrow;
+    } catch (e) {
+      throw ApiException('Нет соединения с сервером: $e');
+    }
+  }
+
+  /// Отметить позицию как отсутствующую в магазине (или вернуть её в заказ).
+  /// Сервер сам пересчитывает сумму заказа и возвращает новые итоги.
+  static Future<OrderAmounts> setItemUnavailable(
+      int orderId,
+      int itemId,
+      bool isUnavailable,
+      ) async {
+    try {
+      final headers = await _buildHeaders();
+      final response = await http.post(
+        Uri.parse('$_baseUrl/orders_api.php?action=set_item_unavailable'),
+        headers: headers,
+        body: jsonEncode({
+          'order_id': orderId,
+          'item_id': itemId,
+          'is_unavailable': isUnavailable,
+        }),
+      ).timeout(_timeout);
+
+      await _checkResponse(response);
+
+      return OrderAmounts.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>,
+      );
     } on ApiException {
       rethrow;
     } catch (e) {
@@ -138,7 +172,7 @@ class ApiService {
         }),
       ).timeout(_timeout);
 
-      _checkResponse(response);
+      await _checkResponse(response);
 
       return ScanResult.fromJson(
         jsonDecode(response.body) as Map<String, dynamic>,
@@ -163,7 +197,7 @@ class ApiService {
         headers: headers,
       ).timeout(_timeout);
 
-      _checkResponse(response);
+      await _checkResponse(response);
 
       final data = jsonDecode(response.body);
       return HistoryResponse.fromJson(data as Map<String, dynamic>);
@@ -186,7 +220,7 @@ class ApiService {
         headers: headers,
       ).timeout(_timeout);
 
-      _checkResponse(response);
+      await _checkResponse(response);
 
       final json = jsonDecode(response.body);
       return Statistics.fromJson(json as Map<String, dynamic>);
@@ -216,6 +250,44 @@ class ApiException implements Exception {
 // ============================================
 // Models
 // ============================================
+
+/// Итоги по деньгам заказа после изменения состава.
+class OrderAmounts {
+  /// Актуальная сумма — её берут с клиента при оплате курьеру.
+  final double totalPrice;
+
+  /// Сумма при оформлении. Именно её списала ЮKassa.
+  final double originalTotalPrice;
+
+  /// Сколько стоили позиции, которых не оказалось в наличии.
+  final double removedTotal;
+
+  /// К возврату. Ненулевой только для заказов, оплаченных онлайн.
+  /// Возврат пока оформляется вручную — автоматики нет.
+  final double refundDue;
+
+  final int unavailableCount;
+
+  const OrderAmounts({
+    this.totalPrice = 0,
+    this.originalTotalPrice = 0,
+    this.removedTotal = 0,
+    this.refundDue = 0,
+    this.unavailableCount = 0,
+  });
+
+  factory OrderAmounts.fromJson(Map<String, dynamic> json) {
+    return OrderAmounts(
+      totalPrice: _parseDouble(json['total_price']),
+      originalTotalPrice: _parseDouble(json['original_total_price']),
+      removedTotal: _parseDouble(json['removed_total']),
+      refundDue: _parseDouble(json['refund_due']),
+      unavailableCount: json['unavailable_count'] is int
+          ? json['unavailable_count'] as int
+          : 0,
+    );
+  }
+}
 
 class ScanResult {
 
@@ -279,6 +351,18 @@ class Order {
   final int? collectedCount;
   final int? progress;
 
+  /// Сумма заказа при оформлении — до того, как сборщик снял
+  /// отсутствующие позиции. Её списала ЮKassa.
+  final double originalTotalPrice;
+
+  /// Стоимость снятых позиций.
+  final double removedTotal;
+
+  /// К возврату клиенту (только для оплаченных онлайн).
+  final double refundDue;
+
+  final int unavailableCount;
+
   const Order({
     required this.id,
     required this.customerName,
@@ -297,7 +381,12 @@ class Order {
     this.itemsCount,
     this.collectedCount,
     this.progress,
-  }) : _paymentState = paymentState;
+    double? originalTotalPrice,
+    this.removedTotal = 0,
+    this.refundDue = 0,
+    this.unavailableCount = 0,
+  })  : _paymentState = paymentState,
+        originalTotalPrice = originalTotalPrice ?? totalPrice;
 
   String get paymentState => _paymentState;
 
@@ -327,6 +416,9 @@ class Order {
 
   double get amountToCollect => isPaidOnline ? 0 : totalPrice;
 
+  /// Состав заказа изменился: что-то не нашлось на полке.
+  bool get hasUnavailable => removedTotal > 0 || unavailableCount > 0;
+
   factory Order.fromJson(Map<String, dynamic> json) {
     final rawItems = json['items'] as List? ?? [];
     return Order(
@@ -351,6 +443,14 @@ class Order {
       itemsCount: json['items_count'],
       collectedCount: json['collected_count'],
       progress: json['progress'],
+      originalTotalPrice: json['original_total_price'] != null
+          ? _parseDouble(json['original_total_price'])
+          : null,
+      removedTotal: _parseDouble(json['removed_total']),
+      refundDue: _parseDouble(json['refund_due']),
+      unavailableCount: json['unavailable_count'] is int
+          ? json['unavailable_count'] as int
+          : 0,
     );
   }
 
@@ -386,6 +486,10 @@ class Order {
     int? itemsCount,
     int? collectedCount,
     int? progress,
+    double? originalTotalPrice,
+    double? removedTotal,
+    double? refundDue,
+    int? unavailableCount,
   }) {
     return Order(
       id: id ?? this.id,
@@ -405,6 +509,10 @@ class Order {
       itemsCount: itemsCount ?? this.itemsCount,
       collectedCount: collectedCount ?? this.collectedCount,
       progress: progress ?? this.progress,
+      originalTotalPrice: originalTotalPrice ?? this.originalTotalPrice,
+      removedTotal: removedTotal ?? this.removedTotal,
+      refundDue: refundDue ?? this.refundDue,
+      unavailableCount: unavailableCount ?? this.unavailableCount,
     );
   }
 
@@ -439,6 +547,9 @@ class OrderItem {
   final double price;
   final bool isCollected;
 
+  /// Товара не оказалось в магазине. Позиция исключена из суммы заказа.
+  final bool isUnavailable;
+
   const OrderItem({
     this.id = 0,
     required this.productId,
@@ -446,7 +557,10 @@ class OrderItem {
     required this.quantity,
     required this.price,
     this.isCollected = false,
+    this.isUnavailable = false,
   });
+
+  double get subtotal => price * quantity;
 
   factory OrderItem.fromJson(Map<String, dynamic> json) {
     return OrderItem(
@@ -456,6 +570,7 @@ class OrderItem {
       quantity: json['quantity'] ?? 0,
       price: _parseDouble(json['price']),
       isCollected: json['is_collected'] ?? false,
+      isUnavailable: json['is_unavailable'] ?? false,
     );
   }
 
@@ -466,6 +581,7 @@ class OrderItem {
     int? quantity,
     double? price,
     bool? isCollected,
+    bool? isUnavailable,
   }) {
     return OrderItem(
       id: id ?? this.id,
@@ -474,6 +590,7 @@ class OrderItem {
       quantity: quantity ?? this.quantity,
       price: price ?? this.price,
       isCollected: isCollected ?? this.isCollected,
+      isUnavailable: isUnavailable ?? this.isUnavailable,
     );
   }
 }

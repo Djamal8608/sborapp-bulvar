@@ -104,6 +104,92 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     }
   }
 
+  /// Отметить, что товара нет в магазине (или вернуть его в заказ).
+  /// Сумма заказа пересчитывается на сервере — берём её из ответа.
+  Future<void> _setUnavailable(OrderItem item, bool value) async {
+    final order = _order;
+    if (order == null) return;
+
+    if (value) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Товара нет в наличии?'),
+          content: Text(
+            '«${item.productName}» будет исключён из заказа.\n\n'
+                'Сумма уменьшится на ${item.subtotal.toStringAsFixed(2)} ₽, '
+                'клиент увидит это в своём приложении.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Отмена'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Нет в наличии'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed != true) return;
+    }
+
+    final index = _items.indexWhere((e) => e.id == item.id);
+    if (index == -1) return;
+
+    final previous = _items[index];
+
+    setState(() {
+      // Отсутствующий товар не может считаться собранным.
+      _items[index] = previous.copyWith(
+        isUnavailable: value,
+        isCollected: value ? false : previous.isCollected,
+      );
+    });
+
+    try {
+      final amounts =
+      await ApiService.setItemUnavailable(order.id, item.id, value);
+
+      if (!mounted) return;
+      setState(() {
+        _order = _order?.copyWith(
+          totalPrice: amounts.totalPrice,
+          originalTotalPrice: amounts.originalTotalPrice,
+          removedTotal: amounts.removedTotal,
+          refundDue: amounts.refundDue,
+          unavailableCount: amounts.unavailableCount,
+        );
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            value
+                ? 'Нет в наличии: ${item.productName}. Сумма — ${amounts.totalPrice.toStringAsFixed(2)} ₽'
+                : 'Возвращено в заказ: ${item.productName}',
+          ),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _items[index] = previous);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Ошибка: $e'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
   Future<void> _openScanner() async {
     if (_order == null) return;
 
@@ -160,8 +246,22 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     );
   }
 
+  /// Статусы, при которых сборка ещё не начата
   static const Set<String> _beforePicking = {'new', 'paid', 'receipt_created'};
 
+  /// Статусы, в которых состав заказа ещё можно менять.
+  /// Должны совпадать с EDITABLE_STATUSES в orders_api.php — иначе
+  /// приложение предлагает действие, на которое сервер отвечает 409.
+  static const Set<String> _editable = {
+    'new',
+    'paid',
+    'receipt_created',
+    'processing',
+  };
+
+  bool get _canEdit => _editable.contains(_order?.status ?? 'new');
+
+  /// Сборщик берёт заказ в работу. Клиент увидит «Собирается».
   Future<void> _startPicking() async {
     final order = _order;
     if (order == null) return;
@@ -249,6 +349,63 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     }
   }
 
+  /// Ни одной позиции не осталось в наличии — заказ нечего собирать.
+  Future<void> _cancelOrder() async {
+    final order = _order;
+    if (order == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Отменить заказ?'),
+        content: Text(
+          'В заказе #${order.id} не осталось товаров в наличии.\n\n'
+              '${order.isPaidOnline ? 'Заказ оплачен онлайн — возврат ${order.originalTotalPrice.toStringAsFixed(2)} ₽ оформляет магазин.' : 'Клиенту ничего не привозим.'}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Назад'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Отменить заказ'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    setState(() => _isLoading = true);
+
+    try {
+      await ApiService.updateOrderStatus(order.id, 'canceled');
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Заказ отменён'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Ошибка: $e'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
   Future<void> _completeOrder() async {
     if (_order == null) return;
 
@@ -312,7 +469,8 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.qr_code_scanner),
-            onPressed: _order != null ? _openScanner : null,
+            // Сканирование тоже меняет состав — после отправки сервер откажет.
+            onPressed: (_order != null && _canEdit) ? _openScanner : null,
             tooltip: 'Сканировать',
           ),
           IconButton(
@@ -340,16 +498,20 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       return const Center(child: Text('Заказ не найден'));
     }
 
-    final collectedCount = _items.where((e) => e.isCollected).length;
-    final totalCount = _items.length;
+    // Отсутствующие позиции не участвуют в прогрессе: собрать их нельзя,
+    // и если оставить их в знаменателе, заказ никогда не дойдёт до 100%.
+    final active = _items.where((e) => !e.isUnavailable).toList();
+    final collectedCount = active.where((e) => e.isCollected).length;
+    final totalCount = active.length;
     final allCollected = totalCount > 0 && collectedCount == totalCount;
     final progressValue = totalCount > 0 ? collectedCount / totalCount : 0.0;
+    final nothingLeft = _items.isNotEmpty && active.isEmpty;
 
     return Column(
       children: [
         _buildOrderInfoCard(collectedCount, totalCount, progressValue),
         Expanded(child: _buildItemsList()),
-        _buildCompleteButton(allCollected),
+        _buildCompleteButton(allCollected, nothingLeft),
       ],
     );
   }
@@ -407,6 +569,47 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                 ),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Пояснение под суммой: что снято и что с деньгами.
+  /// Для оплаченных онлайн возврат пока оформляется вручную —
+  /// автоматического частичного возврата ещё нет.
+  Widget _buildUnavailableNote() {
+    final order = _order;
+    if (order == null) return const SizedBox.shrink();
+
+    final refund = order.refundDue;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.red.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.red.withOpacity(0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Снято позиций: ${order.unavailableCount} '
+                'на ${order.removedTotal.toStringAsFixed(2)} ₽',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: Colors.red[800],
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            refund > 0
+                ? 'Оплачено онлайн — возврат ${refund.toStringAsFixed(2)} ₽ оформляет магазин'
+                : 'Взять с клиента: ${order.totalPrice.toStringAsFixed(2)} ₽',
+            style: TextStyle(fontSize: 12, color: Colors.red[800]),
           ),
         ],
       ),
@@ -495,17 +698,36 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                     ],
                   ),
                 ),
-                // Цена
-                Text(
-                  '${_order!.totalPrice.toStringAsFixed(2)} ₽',
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.green,
-                  ),
+                // Цена: если что-то сняли, показываем и старую сумму —
+                // сборщик должен взять с клиента именно новую.
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    if (_order!.hasUnavailable)
+                      Text(
+                        '${_order!.originalTotalPrice.toStringAsFixed(2)} ₽',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Colors.grey,
+                          decoration: TextDecoration.lineThrough,
+                        ),
+                      ),
+                    Text(
+                      '${_order!.totalPrice.toStringAsFixed(2)} ₽',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green,
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
+            if (_order!.hasUnavailable) ...[
+              const SizedBox(height: 8),
+              _buildUnavailableNote(),
+            ],
             if (_order!.address.isNotEmpty) ...[
               const SizedBox(height: 8),
               Row(
@@ -574,54 +796,108 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       );
     }
 
-    return ListView.separated(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      itemCount: _items.length,
-      separatorBuilder: (_, __) => const Divider(height: 1),
-      itemBuilder: (context, index) {
-        final item = _items[index];
-
-        return CheckboxListTile(
-          // ✅ value берётся из локального _items, не из order.items
-          value: item.isCollected,
-          onChanged: (value) => _updateItemStatus(item, value ?? false),
-          title: Text(
-            item.productName,
-            style: TextStyle(
-              fontWeight: FontWeight.w500,
-              decoration: item.isCollected
-                  ? TextDecoration.lineThrough
-                  : TextDecoration.none,
-              color: item.isCollected ? Colors.grey : null,
+    return Column(
+      children: [
+        if (!_canEdit)
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.grey[200],
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.lock_outline, size: 18, color: Colors.grey[700]),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Заказ уже отправлен — состав и сумму изменить нельзя',
+                    style: TextStyle(fontSize: 13, color: Colors.grey[800]),
+                  ),
+                ),
+              ],
             ),
           ),
-          subtitle: Text(
-            '× ${item.quantity}  •  ${item.price.toStringAsFixed(2)} ₽',
-            style: const TextStyle(fontSize: 12),
+        Expanded(
+          child: ListView.separated(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            itemCount: _items.length,
+            separatorBuilder: (_, __) => const Divider(height: 1),
+            itemBuilder: (context, index) => _buildItemTile(_items[index]),
           ),
-          secondary: CircleAvatar(
-            radius: 16,
-            backgroundColor:
-            item.isCollected ? Colors.green[100] : Colors.grey[200],
-            child: Text(
-              '${item.quantity}',
-              style: TextStyle(
-                fontSize: 12,
-                color: item.isCollected ? Colors.green[800] : Colors.grey[700],
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-          activeColor: Colors.green,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-          ),
-        );
-      },
+        ),
+      ],
     );
   }
 
-  Widget _buildCompleteButton(bool allCollected) {
+  Widget _buildItemTile(OrderItem item) {
+    final missing = item.isUnavailable;
+    final dimmed = missing || item.isCollected;
+    // После отправки заказа сервер откажет в любой правке состава,
+    // поэтому не показываем действия, которые заведомо не пройдут.
+    final locked = !_canEdit;
+
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      // У отсутствующего товара галочку сборки ставить не из чего.
+      leading: Checkbox(
+        value: item.isCollected,
+        onChanged: (missing || locked)
+            ? null
+            : (value) => _updateItemStatus(item, value ?? false),
+        activeColor: Colors.green,
+      ),
+      title: Text(
+        item.productName,
+        style: TextStyle(
+          fontWeight: FontWeight.w500,
+          decoration:
+          dimmed ? TextDecoration.lineThrough : TextDecoration.none,
+          color: missing ? Colors.red[400] : (dimmed ? Colors.grey : null),
+        ),
+      ),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '× ${item.quantity}  •  ${item.price.toStringAsFixed(2)} ₽'
+                '  =  ${item.subtotal.toStringAsFixed(2)} ₽',
+            style: const TextStyle(fontSize: 12),
+          ),
+          if (missing)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                'Нет в наличии — вычтено из суммы',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.red[700],
+                ),
+              ),
+            ),
+        ],
+      ),
+      trailing: locked
+          ? null
+          : IconButton(
+        icon: Icon(
+          missing ? Icons.undo : Icons.remove_shopping_cart_outlined,
+          color: missing ? Colors.blue : Colors.red[400],
+        ),
+        tooltip: missing ? 'Вернуть в заказ' : 'Нет в наличии',
+        onPressed: () => _setUnavailable(item, !missing),
+      ),
+    );
+  }
+
+  /// Кнопка внизу зависит от того, на каком шаге заказ:
+  ///   принят      → «Начать сборку»
+  ///   собирается  → «Готов к доставке» (когда всё собрано)
+  ///   отправлен   → ничего не делаем
+  Widget _buildCompleteButton(bool allCollected, bool nothingLeft) {
     final status = _order?.status ?? 'new';
 
     final String label;
@@ -629,7 +905,14 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     final VoidCallback? action;
     final Color? color;
 
-    if (_beforePicking.contains(status)) {
+    if (nothingLeft && !_beforePicking.contains(status)) {
+      // Собирать нечего — все позиции отмечены отсутствующими.
+      // Отправлять пустой заказ курьеру бессмысленно, остаётся отменить.
+      label = 'Отменить заказ';
+      icon = Icons.cancel_outlined;
+      action = _isLoading ? null : _cancelOrder;
+      color = Colors.red;
+    } else if (_beforePicking.contains(status)) {
       label = 'Начать сборку';
       icon = Icons.play_arrow;
       action = _isLoading ? null : _startPicking;
