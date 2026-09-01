@@ -160,6 +160,40 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     );
   }
 
+  static const Set<String> _beforePicking = {'new', 'paid', 'receipt_created'};
+
+  Future<void> _startPicking() async {
+    final order = _order;
+    if (order == null) return;
+
+    setState(() => _isLoading = true);
+
+    try {
+      await ApiService.updateOrderStatus(order.id, 'processing');
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Сборка начата'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+
+      await _loadOrder();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Ошибка: $e'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
   Future<void> _prepareOrder() async {
     if (_order == null) return;
 
@@ -199,6 +233,8 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
+
+      await _loadOrder();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -586,17 +622,37 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   }
 
   Widget _buildCompleteButton(bool allCollected) {
+    final status = _order?.status ?? 'new';
+
+    final String label;
+    final IconData icon;
+    final VoidCallback? action;
+    final Color? color;
+
+    if (_beforePicking.contains(status)) {
+      label = 'Начать сборку';
+      icon = Icons.play_arrow;
+      action = _isLoading ? null : _startPicking;
+      color = Colors.blue;
+    } else if (status == 'processing') {
+      label = allCollected ? 'Готов к доставке' : 'Собрать все товары';
+      icon = allCollected ? Icons.local_shipping : Icons.pending_actions;
+      action = (allCollected && !_isLoading) ? _prepareOrder : null;
+      color = allCollected ? Colors.green : null;
+    } else {
+      label = 'Заказ отправлен';
+      icon = Icons.check_circle;
+      action = null;
+      color = null;
+    }
+
     return Padding(
       padding: const EdgeInsets.all(16),
       child: ElevatedButton(
-        onPressed: (allCollected && !_isLoading && _order?.status != 'packed')
-            ? _prepareOrder
-            : null,
+        onPressed: action,
         style: ElevatedButton.styleFrom(
           minimumSize: const Size(double.infinity, 52),
-          backgroundColor: allCollected && _order?.status != 'packed'
-              ? Colors.green
-              : null,
+          backgroundColor: color,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),
@@ -613,18 +669,9 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             : Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
-              allCollected ? Icons.local_shipping : Icons.pending_actions,
-            ),
+            Icon(icon),
             const SizedBox(width: 8),
-            Text(
-              _order?.status == 'packed'
-                  ? 'Заказ завершён'
-                  : (allCollected
-                  ? 'Готов к доставке'
-                  : 'Собрать все товары'),
-              style: TextStyle(fontSize: 16),
-            ),
+            Text(label, style: const TextStyle(fontSize: 16)),
           ],
         ),
       ),
