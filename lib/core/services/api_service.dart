@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:sborapps/core/services/admin_auth_service.dart';
+import 'package:sborapps/core/services/app_config.dart';
 
 double _parseDouble(dynamic value) {
   if (value == null) return 0;
@@ -9,7 +10,7 @@ double _parseDouble(dynamic value) {
 }
 
 class ApiService {
-  static const String _baseUrl = 'https://dagix.ru/BrBulvar/sbor_api';
+  static String get _baseUrl => AppConfig.apiBaseUrl;
   static const Duration _timeout = Duration(seconds: 30);
 
   static Future<Map<String, String>> _buildHeaders() async {
@@ -157,6 +158,69 @@ class ApiService {
       rethrow;
     } catch (e) {
       throw ApiException('Нет соединения с сервером: $e');
+    }
+  }
+
+  /// Пробить чек на виртуальной кассе mobile (для наличной оплаты).
+  /// После этого синхронизатор 1С отправит чек на физическую кассу —
+  /// она распечатает его.
+  static Future<void> checkoutOrder({
+    required int orderId,
+    required List<OrderItem> items,
+    required double totalAmount,
+    required String paymentType,
+  }) async {
+    try {
+      final secret = AppConfig.gatewaySecret;
+      if (secret.isEmpty) {
+        throw ApiException('Не настроен GATEWAY_SECRET в .env или --dart-define');
+      }
+
+      final response = await http.post(
+        Uri.parse(AppConfig.gatewayUrl),
+        headers: {'Content-Type': 'application/json; charset=utf-8'},
+        body: jsonEncode({
+          'secret': secret,
+          'route': 'checkout_order',
+          'params': {
+            'secret': secret,
+            'order_id': orderId,
+            'items': items.map((i) => {
+              'product_id': i.productId,
+              'quantity': i.quantity.toDouble(),
+              'price': i.price,
+              'total': i.subtotal,
+            }).toList(),
+            'payment_type': paymentType,
+            'cash_amount': paymentType == 'cash' ? totalAmount : 0,
+            'card_amount': paymentType == 'card' ? totalAmount : 0,
+            'comment': 'Чек по заказу сборщика №$orderId',
+          },
+        }),
+      );
+
+      if (response.statusCode != 200) {
+        String error = 'Ошибка пробития чека (${response.statusCode})';
+        try {
+          final body = jsonDecode(response.body);
+          if (body is Map && body['message'] != null) {
+            error = body['message'].toString();
+          }
+        } catch (_) {}
+        throw ApiException(error, response.statusCode);
+      }
+
+      final body = jsonDecode(response.body);
+      if (body is Map && body['success'] != true) {
+        throw ApiException(
+          body['message']?.toString() ?? 'Чек не пробит',
+          500,
+        );
+      }
+    } on ApiException {
+      rethrow;
+    } catch (e) {
+      throw ApiException('Нет связи с кассой: $e');
     }
   }
 

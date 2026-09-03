@@ -297,12 +297,20 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   Future<void> _prepareOrder() async {
     if (_order == null) return;
 
+    final order = _order!;
+    final isCash = !order.isPaidOnline && order.paymentMethod == 'cash';
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Отправить на доставку?'),
-        content: const Text(
-          'Заказ будет отмечен как готов к доставке.\n'
+        title: Text(isCash ? 'Пробить чек и отправить на доставку?' : 'Отправить на доставку?'),
+        content: Text(
+          isCash
+              ? 'Заказ будет отмечен как готов к доставке.\n\n'
+              '✓ Сразу будет пробит чек на кассе '
+              'на сумму ${order.totalPrice.toStringAsFixed(2)} ₽.\n'
+              'Доставщик сможет забрать посылку.'
+              : 'Заказ будет отмечен как готов к доставке.\n'
               'Доставщик сможет забрать посылку.',
         ),
         actions: [
@@ -323,13 +331,72 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     setState(() => _isLoading = true);
 
     try {
-      await ApiService.updateOrderStatus(_order!.id, 'packed');
+      // 1. Сначала пробиваем чек (только для наличных)
+      if (isCash) {
+        try {
+          await ApiService.checkoutOrder(
+            orderId: order.id,
+            items: order.items.where((e) => !e.isUnavailable).toList(),
+            totalAmount: order.totalPrice,
+            paymentType: 'cash',
+          );
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('✓ Чек отправлен на кассу'),
+                backgroundColor: Colors.green,
+                behavior: SnackBarBehavior.floating,
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+        } catch (e) {
+          // Чек не пробился — спрашиваем, что делать
+          if (!mounted) return;
+
+          final proceed = await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Чек не пробился'),
+              content: Text(
+                'Ошибка: $e\n\n'
+                    'Заказ всё равно отправить на доставку?\n\n'
+                    '⚠ Чек придётся пробить вручную на кассе.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Отмена'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('Отправить без чека'),
+                ),
+              ],
+            ),
+          );
+
+          if (proceed != true) {
+            setState(() => _isLoading = false);
+            return;
+          }
+        }
+      }
+
+      // 2. Переводим заказ в статус 'packed'
+      await ApiService.updateOrderStatus(order.id, 'packed');
 
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✓ Заказ готов к доставке!'),
+        SnackBar(
+          content: Text(
+            isCash
+                ? '✓ Чек пробит и заказ готов к доставке!'
+                : '✓ Заказ готов к доставке!',
+          ),
           behavior: SnackBarBehavior.floating,
         ),
       );
