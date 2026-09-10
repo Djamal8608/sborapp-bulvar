@@ -84,7 +84,10 @@ class ApiService {
     }
   }
 
-  static Future<void> updateOrderStatus(int orderId, String status) async {
+  static Future<StatusUpdateResult> updateOrderStatus(
+      int orderId,
+      String status,
+      ) async {
     try {
       final headers = await _buildHeaders();
       final response = await http.post(
@@ -97,6 +100,10 @@ class ApiService {
       ).timeout(_timeout);
 
       await _checkResponse(response);
+
+      return StatusUpdateResult.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>,
+      );
     } on ApiException {
       rethrow;
     } catch (e) {
@@ -251,6 +258,39 @@ class ApiException implements Exception {
 // Models
 // ============================================
 
+/// Результат смены статуса заказа: что произошло с чеком, деньгами и доставкой.
+class StatusUpdateResult {
+  /// Печать чека на физической кассе. null — заказ не наличный,
+  /// чек не требовался.
+  final bool? receiptPrinted;
+
+  /// Заявка ушла в шлюз доставки.
+  final bool? deliveryGatewaySent;
+
+  /// Сколько списано с клиента при упаковке.
+  final double? capturedAmount;
+
+  const StatusUpdateResult({
+    this.receiptPrinted,
+    this.deliveryGatewaySent,
+    this.capturedAmount,
+  });
+
+  factory StatusUpdateResult.fromJson(Map<String, dynamic> json) {
+    return StatusUpdateResult(
+      receiptPrinted: json['receipt_printed'] is bool
+          ? json['receipt_printed'] as bool
+          : null,
+      deliveryGatewaySent: json['delivery_gateway_sent'] is bool
+          ? json['delivery_gateway_sent'] as bool
+          : null,
+      capturedAmount: json['captured_amount'] != null
+          ? _parseDouble(json['captured_amount'])
+          : null,
+    );
+  }
+}
+
 /// Итоги по деньгам заказа после изменения состава.
 class OrderAmounts {
   /// Актуальная сумма — её берут с клиента при оплате курьеру.
@@ -363,6 +403,9 @@ class Order {
 
   final int unavailableCount;
 
+  /// Когда истекает холдирование денег.
+  final DateTime? holdExpiresAt;
+
   const Order({
     required this.id,
     required this.customerName,
@@ -385,6 +428,7 @@ class Order {
     this.removedTotal = 0,
     this.refundDue = 0,
     this.unavailableCount = 0,
+    this.holdExpiresAt,
   })  : _paymentState = paymentState,
         originalTotalPrice = originalTotalPrice ?? totalPrice;
 
@@ -392,10 +436,23 @@ class Order {
 
   bool get isAwaitingPayment => _paymentState == 'awaiting_payment';
 
+  /// Деньги заморожены на карте клиента, спишутся при отправке заказа.
+  bool get isHeld => _paymentState == 'held';
+
+  /// Клиент привязал счёт СБП: спишем точную сумму при отправке.
+  bool get isChargeOnPack => _paymentState == 'charge_on_pack';
+
+  /// Деньги у магазина или гарантированно будут — наличные брать не нужно.
+  bool get moneySecured => isPaidOnline || isHeld || isChargeOnPack;
+
   String get paymentLabel {
     switch (_paymentState) {
       case 'paid_online':
         return 'Оплачен онлайн';
+      case 'held':
+        return 'Оплачен онлайн (заморожено)';
+      case 'charge_on_pack':
+        return 'Спишем при отправке';
       case 'awaiting_payment':
         return 'Ожидает оплаты';
       default:
@@ -407,6 +464,10 @@ class Order {
     switch (_paymentState) {
       case 'paid_online':
         return 'Деньги с клиента не брать';
+      case 'held':
+        return 'Спишем ₽${totalPrice.toStringAsFixed(2)} при отправке. Наличные не брать';
+      case 'charge_on_pack':
+        return 'Счёт привязан. Спишем ₽${totalPrice.toStringAsFixed(2)}, когда отправите. Наличные не брать';
       case 'awaiting_payment':
         return 'Оплата ещё не подтверждена — не выдавать';
       default:
@@ -414,7 +475,18 @@ class Order {
     }
   }
 
-  double get amountToCollect => isPaidOnline ? 0 : totalPrice;
+  double get amountToCollect => moneySecured ? 0 : totalPrice;
+
+  /// Сколько осталось до конца холда. По СБП он живёт всего 2 часа.
+  Duration? get holdTimeLeft {
+    if (!isHeld || holdExpiresAt == null) return null;
+    return holdExpiresAt!.difference(DateTime.now());
+  }
+
+  bool get isHoldExpired {
+    final left = holdTimeLeft;
+    return left != null && left.isNegative;
+  }
 
   /// Состав заказа изменился: что-то не нашлось на полке.
   bool get hasUnavailable => removedTotal > 0 || unavailableCount > 0;
@@ -451,6 +523,9 @@ class Order {
       unavailableCount: json['unavailable_count'] is int
           ? json['unavailable_count'] as int
           : 0,
+      holdExpiresAt: json['hold_expires_at'] != null
+          ? DateTime.tryParse(json['hold_expires_at'].toString())
+          : null,
     );
   }
 
@@ -490,6 +565,7 @@ class Order {
     double? removedTotal,
     double? refundDue,
     int? unavailableCount,
+    DateTime? holdExpiresAt,
   }) {
     return Order(
       id: id ?? this.id,
@@ -513,6 +589,7 @@ class Order {
       removedTotal: removedTotal ?? this.removedTotal,
       refundDue: refundDue ?? this.refundDue,
       unavailableCount: unavailableCount ?? this.unavailableCount,
+      holdExpiresAt: holdExpiresAt ?? this.holdExpiresAt,
     );
   }
 

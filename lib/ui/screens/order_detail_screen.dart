@@ -297,12 +297,19 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   Future<void> _prepareOrder() async {
     if (_order == null) return;
 
+    final order = _order!;
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Отправить на доставку?'),
-        content: const Text(
-          'Заказ будет отмечен как готов к доставке.\n'
+        content: Text(
+          order.moneySecured && !order.isPaidOnline
+              ? 'С карты клиента будет списано '
+              '${order.totalPrice.toStringAsFixed(2)} ₽'
+              '${order.hasUnavailable ? ' вместо ${order.originalTotalPrice.toStringAsFixed(2)} ₽' : ''}.\n\n'
+              'Изменить состав после этого будет нельзя.'
+              : 'Заказ будет отмечен как готов к доставке.\n'
               'Доставщик сможет забрать посылку.',
         ),
         actions: [
@@ -323,16 +330,38 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     setState(() => _isLoading = true);
 
     try {
-      await ApiService.updateOrderStatus(_order!.id, 'packed');
+      final result = await ApiService.updateOrderStatus(order.id, 'packed');
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✓ Заказ готов к доставке!'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      // Чек не напечатался — сборщик должен узнать об этом сразу,
+      // иначе курьер уедет без чека для клиента.
+      if (result.receiptPrinted == false) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              '⚠ Заказ отправлен, но ЧЕК НЕ УШЁЛ НА КАССУ. '
+                  'Пробейте его вручную',
+            ),
+            backgroundColor: Colors.deepOrange,
+            duration: Duration(seconds: 8),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              result.receiptPrinted == true
+                  ? '✓ Чек отправлен на кассу, заказ готов к доставке'
+                  : order.moneySecured && !order.isPaidOnline
+                  ? '✓ Списано ${order.totalPrice.toStringAsFixed(2)} ₽, заказ готов к доставке'
+                  : '✓ Заказ готов к доставке!',
+            ),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
 
       await _loadOrder();
     } catch (e) {
@@ -516,6 +545,36 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     );
   }
 
+  String _moneyNote(Order order, double refund) {
+    if (order.isChargeOnPack) {
+      return 'Спишем ${order.totalPrice.toStringAsFixed(2)} ₽ вместо '
+          '${order.originalTotalPrice.toStringAsFixed(2)} ₽ — '
+          'за отсутствующие позиции клиент не платит';
+    }
+    if (order.isHeld) {
+      return 'Спишем ${order.totalPrice.toStringAsFixed(2)} ₽ вместо '
+          '${order.originalTotalPrice.toStringAsFixed(2)} ₽ — '
+          'остальное разморозится клиенту';
+    }
+    if (refund > 0) {
+      return 'Оплачено онлайн — возврат ${refund.toStringAsFixed(2)} ₽ оформляет магазин';
+    }
+    return 'Взять с клиента: ${order.totalPrice.toStringAsFixed(2)} ₽';
+  }
+
+  String _holdCountdown(Order order) {
+    final left = order.holdTimeLeft;
+    if (left == null) return '';
+    if (left.isNegative) {
+      return '⚠ Заморозка истекла — деньги вернулись клиенту';
+    }
+
+    final h = left.inHours;
+    final m = left.inMinutes % 60;
+    final time = h > 0 ? '$h ч $m мин' : '$m мин';
+    return '⏳ Собрать и отправить за $time';
+  }
+
   Widget _buildPaymentBanner() {
     final order = _order;
     if (order == null) return const SizedBox.shrink();
@@ -527,6 +586,14 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       case 'paid_online':
         color = Colors.green;
         icon = Icons.verified;
+        break;
+      case 'held':
+        color = order.isHoldExpired ? Colors.red : Colors.blue;
+        icon = order.isHoldExpired ? Icons.timer_off : Icons.lock_clock;
+        break;
+      case 'charge_on_pack':
+        color = Colors.blue;
+        icon = Icons.link;
         break;
       case 'awaiting_payment':
         color = Colors.red;
@@ -567,6 +634,15 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   order.paymentHint,
                   style: TextStyle(fontSize: 13, color: color.shade800),
                 ),
+                if (order.isHeld)
+                  Text(
+                    _holdCountdown(order),
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      color: color.shade800,
+                    ),
+                  ),
               ],
             ),
           ),
@@ -606,9 +682,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           ),
           const SizedBox(height: 2),
           Text(
-            refund > 0
-                ? 'Оплачено онлайн — возврат ${refund.toStringAsFixed(2)} ₽ оформляет магазин'
-                : 'Взять с клиента: ${order.totalPrice.toStringAsFixed(2)} ₽',
+            _moneyNote(order, refund),
             style: TextStyle(fontSize: 12, color: Colors.red[800]),
           ),
         ],
