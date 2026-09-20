@@ -447,13 +447,15 @@ class HistoryOrderCard extends StatelessWidget {
 
   String _formatDate(DateTime dateTime) {
     final now = DateTime.now();
-    final difference = now.difference(dateTime);
+    final days = DateTime(now.year, now.month, now.day)
+        .difference(DateTime(dateTime.year, dateTime.month, dateTime.day))
+        .inDays;
     final time =
         '${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}';
 
-    if (difference.inDays == 0) {
+    if (days == 0) {
       return 'Сегодня $time';
-    } else if (difference.inDays == 1) {
+    } else if (days == 1) {
       return 'Вчера $time';
     } else {
       return '${dateTime.day.toString().padLeft(2, '0')}.${dateTime.month.toString().padLeft(2, '0')}.${dateTime.year} $time';

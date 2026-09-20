@@ -77,17 +77,6 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     try {
       await ApiService.updateItemStatus(_order!.id, item.id, value);
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            value ? '✓ ${item.productName} собран' : '✗ ${item.productName} убран',
-          ),
-          duration: const Duration(seconds: 1),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -147,6 +136,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       _items[index] = previous.copyWith(
         isUnavailable: value,
         isCollected: value ? false : previous.isCollected,
+        resetCollectedQuantity: true,
       );
     });
 
@@ -176,6 +166,56 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _items[index] = previous);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Ошибка: $e'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  /// Указать, сколько штук позиции реально нашлось.
+  /// Ноль сервер трактует как «товара нет» и исключает позицию из заказа.
+  Future<void> _setQuantity(OrderItem item, int quantity) async {
+    final order = _order;
+    if (order == null) return;
+    if (quantity < 0 || quantity > item.quantity) return;
+
+    final index = _items.indexWhere((e) => e.id == item.id);
+    if (index == -1) return;
+
+    final previous = _items[index];
+    final full = quantity == item.quantity;
+
+    setState(() {
+      _items[index] = previous.copyWith(
+        isUnavailable: quantity == 0,
+        isCollected: quantity == 0 ? false : previous.isCollected,
+        collectedQuantity: full ? null : quantity,
+        resetCollectedQuantity: full || quantity == 0,
+      );
+    });
+
+    try {
+      final amounts =
+      await ApiService.setItemQuantity(order.id, item.id, quantity);
+
+      if (!mounted) return;
+      setState(() {
+        _order = _order?.copyWith(
+          totalPrice: amounts.totalPrice,
+          originalTotalPrice: amounts.originalTotalPrice,
+          removedTotal: amounts.removedTotal,
+          refundDue: amounts.refundDue,
+          unavailableCount: amounts.unavailableCount,
+        );
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() => _items[index] = previous);
@@ -260,6 +300,8 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   };
 
   bool get _canEdit => _editable.contains(_order?.status ?? 'new');
+
+  bool get _isPicking => _order?.status == 'processing';
 
   /// Сборщик берёт заказ в работу. Клиент увидит «Собирается».
   Future<void> _startPicking() async {
@@ -470,7 +512,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           IconButton(
             icon: const Icon(Icons.qr_code_scanner),
             // Сканирование тоже меняет состав — после отправки сервер откажет.
-            onPressed: (_order != null && _canEdit) ? _openScanner : null,
+            onPressed: (_order != null && _isPicking) ? _openScanner : null,
             tooltip: 'Сканировать',
           ),
           IconButton(
@@ -584,6 +626,19 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     final refund = order.refundDue;
 
+    final removedCount = _items.where((e) => e.isUnavailable).length;
+    final shortUnits = _items
+        .where((e) => e.isPartial)
+        .fold<int>(0, (sum, e) => sum + (e.quantity - e.pickedQuantity));
+
+    final parts = <String>[];
+    if (removedCount > 0) parts.add('снято позиций: $removedCount');
+    if (shortUnits > 0) parts.add('не хватило $shortUnits шт');
+
+    final headline = parts.isEmpty
+        ? 'Сумма уменьшена на ${order.removedTotal.toStringAsFixed(2)} ₽'
+        : '${parts.join(', ')} — на ${order.removedTotal.toStringAsFixed(2)} ₽';
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -596,8 +651,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Снято позиций: ${order.unavailableCount} '
-                'на ${order.removedTotal.toStringAsFixed(2)} ₽',
+            headline[0].toUpperCase() + headline.substring(1),
             style: TextStyle(
               fontSize: 13,
               fontWeight: FontWeight.w600,
@@ -837,7 +891,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     final dimmed = missing || item.isCollected;
     // После отправки заказа сервер откажет в любой правке состава,
     // поэтому не показываем действия, которые заведомо не пройдут.
-    final locked = !_canEdit;
+    final locked = !_isPicking;
 
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -862,10 +916,24 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '× ${item.quantity}  •  ${item.price.toStringAsFixed(2)} ₽'
+            '× ${item.pickedQuantity}  •  ${item.price.toStringAsFixed(2)} ₽'
                 '  =  ${item.subtotal.toStringAsFixed(2)} ₽',
             style: const TextStyle(fontSize: 12),
           ),
+          if (item.isPartial)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                'Заказано ${item.quantity} — оплатит '
+                    '${item.subtotal.toStringAsFixed(2)} ₽ вместо '
+                    '${item.orderedSubtotal.toStringAsFixed(2)} ₽',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.orange[800],
+                ),
+              ),
+            ),
           if (missing)
             Padding(
               padding: const EdgeInsets.only(top: 4),
@@ -878,6 +946,8 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                 ),
               ),
             ),
+          if (!locked && !missing && item.quantity > 1)
+            _buildQuantityStepper(item),
         ],
       ),
       trailing: locked
@@ -889,6 +959,61 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         ),
         tooltip: missing ? 'Вернуть в заказ' : 'Нет в наличии',
         onPressed: () => _setUnavailable(item, !missing),
+      ),
+    );
+  }
+
+  /// Сколько штук нашлось. Минус доводит до нуля — это то же самое,
+  /// что «нет в наличии», поэтому отдельного подтверждения там не нужно.
+  Widget _buildQuantityStepper(OrderItem item) {
+    final picked = item.pickedQuantity;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        children: [
+          const Text('Нашли:', style: TextStyle(fontSize: 12)),
+          const SizedBox(width: 4),
+          _stepperButton(
+            icon: Icons.remove,
+            onTap: picked > 0 ? () => _setQuantity(item, picked - 1) : null,
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Text(
+              '$picked из ${item.quantity}',
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+            ),
+          ),
+          _stepperButton(
+            icon: Icons.add,
+            onTap: picked < item.quantity
+                ? () => _setQuantity(item, picked + 1)
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _stepperButton({required IconData icon, VoidCallback? onTap}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: onTap == null ? Colors.grey[300]! : Colors.grey[500]!,
+          ),
+        ),
+        child: Icon(
+          icon,
+          size: 18,
+          color: onTap == null ? Colors.grey[400] : Colors.black87,
+        ),
       ),
     );
   }
@@ -936,6 +1061,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         style: ElevatedButton.styleFrom(
           minimumSize: const Size(double.infinity, 52),
           backgroundColor: color,
+          foregroundColor: color != null ? Colors.white : null,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),

@@ -393,10 +393,12 @@ class OrderCard extends StatelessWidget {
 
   String _formatDate(DateTime dateTime) {
     final now = DateTime.now();
-    final difference = now.difference(dateTime);
-    if (difference.inDays == 0) {
+    final days = DateTime(now.year, now.month, now.day)
+        .difference(DateTime(dateTime.year, dateTime.month, dateTime.day))
+        .inDays;
+    if (days == 0) {
       return 'Сегодня ${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}';
-    } else if (difference.inDays == 1) {
+    } else if (days == 1) {
       return 'Вчера ${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}';
     } else {
       return '${dateTime.day}.${dateTime.month}.${dateTime.year}';

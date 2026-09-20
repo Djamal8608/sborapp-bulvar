@@ -98,7 +98,7 @@ class ApiService {
           'order_id': orderId,
           'status': status,
         }),
-      ).timeout(_timeout);
+      ).timeout(const Duration(seconds: 90));
 
       await _checkResponse(response);
 
@@ -168,6 +168,37 @@ class ApiService {
     }
   }
 
+  /// Указать, сколько штук позиции реально нашлось в магазине.
+  /// Ноль означает, что товара нет совсем. Сервер пересчитывает сумму заказа.
+  static Future<OrderAmounts> setItemQuantity(
+      int orderId,
+      int itemId,
+      int quantity,
+      ) async {
+    try {
+      final headers = await _buildHeaders();
+      final response = await http.post(
+        Uri.parse('$_baseUrl/orders_api.php?action=set_item_quantity'),
+        headers: headers,
+        body: jsonEncode({
+          'order_id': orderId,
+          'item_id': itemId,
+          'quantity': quantity,
+        }),
+      ).timeout(_timeout);
+
+      await _checkResponse(response);
+
+      return OrderAmounts.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>,
+      );
+    } on ApiException {
+      rethrow;
+    } catch (e) {
+      throw ApiException('Нет соединения с сервером: $e');
+    }
+  }
+
   /// Пробить чек на виртуальной кассе mobile (для наличной оплаты).
   /// После этого синхронизатор 1С отправит чек на физическую кассу —
   /// она распечатает его.
@@ -192,9 +223,11 @@ class ApiService {
           'params': {
             'secret': secret,
             'order_id': orderId,
-            'items': items.map((i) => {
+            'items': items
+                .where((i) => i.pickedQuantity > 0)
+                .map((i) => {
               'product_id': i.productId,
-              'quantity': i.quantity.toDouble(),
+              'quantity': i.pickedQuantity.toDouble(),
               'price': i.price,
               'total': i.subtotal,
             }).toList(),
@@ -529,13 +562,13 @@ class Order {
       case 'paid_online':
         return 'Деньги с клиента не брать';
       case 'held':
-        return 'Спишем ₽${totalPrice.toStringAsFixed(2)} при отправке. Наличные не брать';
+        return 'Спишем ${totalPrice.toStringAsFixed(2)} ₽ при отправке. Наличные не брать';
       case 'charge_on_pack':
-        return 'Счёт привязан. Спишем ₽${totalPrice.toStringAsFixed(2)}, когда отправите. Наличные не брать';
+        return 'Счёт привязан. Спишем ${totalPrice.toStringAsFixed(2)} ₽, когда отправите. Наличные не брать';
       case 'awaiting_payment':
         return 'Оплата ещё не подтверждена — не выдавать';
       default:
-        return 'Взять с клиента ₽${totalPrice.toStringAsFixed(2)}';
+        return 'Взять с клиента ${totalPrice.toStringAsFixed(2)} ₽';
     }
   }
 
@@ -691,6 +724,10 @@ class OrderItem {
   /// Товара не оказалось в магазине. Позиция исключена из суммы заказа.
   final bool isUnavailable;
 
+  /// Сколько штук реально нашлось, если меньше заказанного.
+  /// null — собрали столько, сколько заказывали.
+  final int? collectedQuantity;
+
   const OrderItem({
     this.id = 0,
     required this.productId,
@@ -699,11 +736,21 @@ class OrderItem {
     required this.price,
     this.isCollected = false,
     this.isUnavailable = false,
+    this.collectedQuantity,
   });
 
-  double get subtotal => price * quantity;
+  int get pickedQuantity => isUnavailable ? 0 : (collectedQuantity ?? quantity);
+
+  bool get isPartial =>
+      !isUnavailable && collectedQuantity != null && collectedQuantity != quantity;
+
+  double get subtotal => price * pickedQuantity;
+
+  double get orderedSubtotal => price * quantity;
 
   factory OrderItem.fromJson(Map<String, dynamic> json) {
+    final raw = json['collected_quantity'];
+
     return OrderItem(
       id: json['id'] ?? 0,
       productId: json['product_id'] ?? '',
@@ -712,6 +759,7 @@ class OrderItem {
       price: _parseDouble(json['price']),
       isCollected: json['is_collected'] ?? false,
       isUnavailable: json['is_unavailable'] ?? false,
+      collectedQuantity: raw == null ? null : int.tryParse(raw.toString()),
     );
   }
 
@@ -723,6 +771,8 @@ class OrderItem {
     double? price,
     bool? isCollected,
     bool? isUnavailable,
+    int? collectedQuantity,
+    bool resetCollectedQuantity = false,
   }) {
     return OrderItem(
       id: id ?? this.id,
@@ -732,6 +782,9 @@ class OrderItem {
       price: price ?? this.price,
       isCollected: isCollected ?? this.isCollected,
       isUnavailable: isUnavailable ?? this.isUnavailable,
+      collectedQuantity: resetCollectedQuantity
+          ? null
+          : (collectedQuantity ?? this.collectedQuantity),
     );
   }
 }
