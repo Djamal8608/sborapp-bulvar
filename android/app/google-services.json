@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "235497835527",
+    "project_id": "bulvarsbor",
+    "storage_bucket": "bulvarsbor.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:235497835527:android:db464a9002e9db7a666ea2",
+        "android_client_info": {
+          "package_name": "com.example.sborapps"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC3eMT7zegG8hO6evAbsXCRzl5N4Da1wPU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -34,6 +34,9 @@ class AppConfig {
     return dotenv.env['API_BASE_URL'] ?? 'https://dagix.ru/BrBulvar/sbor_api';
   }
 
+  static String get fcmRegisterUrl =>
+      dotenv.env['FCM_REGISTER_URL'] ?? 'https://dagix.ru/apipay/register_device.php';
+
   /// URL OData-шлюза
   static String get gatewayUrl {
     const value = String.fromEnvironment('GATEWAY_URL');

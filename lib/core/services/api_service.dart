@@ -39,6 +39,31 @@ class ApiService {
     }
   }
 
+  /// Регистрация FCM-токена устройства на сервере.
+  /// Вызывается при входе в приложение или при обновлении токена.
+  static Future<void> registerDeviceToken({
+    required String token,
+    required String platform,
+  }) async {
+    try {
+      final headers = await _buildHeaders();
+      final response = await http.post(
+        Uri.parse(AppConfig.fcmRegisterUrl),
+        headers: headers,
+        body: jsonEncode({
+          'token': token,
+          'platform': platform,
+        }),
+      ).timeout(_timeout);
+
+      await _checkResponse(response);
+    } on ApiException {
+      rethrow;
+    } catch (e) {
+      throw ApiException('Не удалось зарегистрировать устройство: $e');
+    }
+  }
+
   static Future<List<Order>> getOrders() async {
     try {
       final headers = await _buildHeaders();

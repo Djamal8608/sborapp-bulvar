@@ -60,7 +60,6 @@ class _OrderPickerAppState extends State<OrderPickerApp> {
 
   @override
   Widget build(BuildContext context) {
-    // Загрузка авторизации
     if (_isCheckingAuth) {
       return MaterialApp(
         debugShowCheckedModeBanner: false,
@@ -80,7 +79,6 @@ class _OrderPickerAppState extends State<OrderPickerApp> {
       );
     }
 
-    // Если не авторизован - показать экран входа
     if (!_isAuthenticated) {
       return MaterialApp(
         debugShowCheckedModeBanner: false,
@@ -92,7 +90,6 @@ class _OrderPickerAppState extends State<OrderPickerApp> {
       );
     }
 
-    // Авторизован - показать приложение
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Сборка заказов',
@@ -142,6 +139,24 @@ class _MainScaffoldState extends State<MainScaffold>
 
   @override
   Widget build(BuildContext context) {
+    final screenHeight = MediaQuery.of(context).size.height;
+    final screenWidth = MediaQuery.of(context).size.width;
+
+    // Адаптивные параметры на основе высоты экрана
+    final isVerySmallHeight = screenHeight < 500;
+    final isCompactHeight = screenHeight < 600;
+    final isNarrowWidth = screenWidth < 360;
+
+    // Адаптивные размеры
+    final appBarTitleSize = isVerySmallHeight ? 16.0 : 18.0;
+    final avatarRadius = isVerySmallHeight ? 14.0 : 18.0;
+    final iconSize = isVerySmallHeight ? 18.0 : 20.0;
+    final tabIconSize = isVerySmallHeight ? 18.0 : 24.0;
+    final tabFontSize = isVerySmallHeight ? 10.0 : 14.0;
+
+    // Показывать текст в табах только если достаточно места
+    final showTabText = !isVerySmallHeight && !isNarrowWidth;
+
     return Scaffold(
       drawer: PickerDrawer(
         pickerName: pickerName,
@@ -157,48 +172,103 @@ class _MainScaffoldState extends State<MainScaffold>
           Navigator.of(context).pushNamed('/profile');
         },
       ),
-      appBar: AppBar(
-        title: Text(
-          _selectedIndex == 0 ? 'Заказы' : 'История',
-          style: const TextStyle(color: Colors.white),
+      appBar: PreferredSize(
+        // Адаптивная высота AppBar
+        preferredSize: Size.fromHeight(
+            kToolbarHeight +
+                (isVerySmallHeight ? 36.0 : 48.0) + // Высота TabBar
+                (isCompactHeight ? 0.0 : 4.0) // Дополнительный padding
         ),
-        centerTitle: true,
-        backgroundColor: Colors.blue[600],
-        elevation: 0,
-        bottom: TabBar(
-          controller: _tabController,
-          onTap: (index) => setState(() => _selectedIndex = index),
-          indicatorColor: Colors.white,
-          tabs: const [
-            Tab(icon: Icon(Icons.list_alt), text: 'Заказы'),
-            Tab(icon: Icon(Icons.history), text: 'История'),
-          ],
-        ),
-        actions: [
-          // ✅ Кнопка профиля в AppBar
-          Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: Center(
-              child: GestureDetector(
-                onTap: () {
-                  Navigator.of(context).pushNamed('/profile');
-                },
-                child: Tooltip(
-                  message: widget.admin?.fullName ?? 'Профиль',
-                  child: CircleAvatar(
-                    radius: 18,
-                    backgroundColor: Colors.white.withOpacity(0.3),
-                    child: Icon(
-                      Icons.admin_panel_settings,
-                      size: 20,
-                      color: Colors.white,
-                    ),
+        child: Container(
+          color: Colors.blue[600],
+          child: SafeArea(
+            bottom: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Верхняя часть AppBar с заголовком и аватаром
+                SizedBox(
+                  height: isCompactHeight ? 44.0 : 56.0,
+                  child: Row(
+                    children: [
+                      // Кнопка меню (Drawer)
+                      IconButton(
+                        icon: Icon(
+                          Icons.menu,
+                          color: Colors.white,
+                          size: iconSize,
+                        ),
+                        onPressed: () => Scaffold.of(context).openDrawer(),
+                      ),
+
+                      // Заголовок
+                      Expanded(
+                        child: Center(
+                          child: Text(
+                            _selectedIndex == 0 ? 'Заказы' : 'История',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: appBarTitleSize,
+                              fontWeight: FontWeight.w500,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+
+                      // Кнопка профиля
+                      Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: isVerySmallHeight ? 4.0 : 8.0,
+                        ),
+                        child: GestureDetector(
+                          onTap: () {
+                            Navigator.of(context).pushNamed('/profile');
+                          },
+                          child: Tooltip(
+                            message: widget.admin?.fullName ?? 'Профиль',
+                            child: CircleAvatar(
+                              radius: avatarRadius,
+                              backgroundColor: Colors.white.withOpacity(0.3),
+                              child: Icon(
+                                Icons.admin_panel_settings,
+                                size: isVerySmallHeight ? 16.0 : 20.0,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ),
+
+                // TabBar - адаптивный размер
+                SizedBox(
+                  height: isVerySmallHeight ? 36.0 : 48.0,
+                  child: TabBar(
+                    controller: _tabController,
+                    onTap: (index) => setState(() => _selectedIndex = index),
+                    indicatorColor: Colors.white,
+                    indicatorSize: TabBarIndicatorSize.tab,
+                    labelPadding: EdgeInsets.zero,
+                    tabs: [
+                      Tab(
+                        icon: Icon(Icons.list_alt, size: tabIconSize),
+                        text: showTabText ? 'Заказы' : null,
+                      ),
+                      Tab(
+                        icon: Icon(Icons.history, size: tabIconSize),
+                        text: showTabText ? 'История' : null,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
       body: TabBarView(
         controller: _tabController,
