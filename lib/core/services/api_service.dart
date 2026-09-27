@@ -198,7 +198,7 @@ class ApiService {
   static Future<OrderAmounts> setItemQuantity(
       int orderId,
       int itemId,
-      int quantity,
+      double quantity,
       ) async {
     try {
       final headers = await _buildHeaders();
@@ -252,7 +252,7 @@ class ApiService {
                 .where((i) => i.pickedQuantity > 0)
                 .map((i) => {
               'product_id': i.productId,
-              'quantity': i.pickedQuantity.toDouble(),
+              'quantity': i.pickedQuantity,
               'price': i.price,
               'total': i.subtotal,
             }).toList(),
@@ -742,7 +742,7 @@ class OrderItem {
   final int id;
   final String productId;
   final String productName;
-  final int quantity;
+  final double quantity;
   final double price;
   final bool isCollected;
 
@@ -751,7 +751,9 @@ class OrderItem {
 
   /// Сколько штук реально нашлось, если меньше заказанного.
   /// null — собрали столько, сколько заказывали.
-  final int? collectedQuantity;
+  final double? collectedQuantity;
+
+  final String unit;
 
   const OrderItem({
     this.id = 0,
@@ -762,16 +764,32 @@ class OrderItem {
     this.isCollected = false,
     this.isUnavailable = false,
     this.collectedQuantity,
+    this.unit = 'шт',
   });
 
-  int get pickedQuantity => isUnavailable ? 0 : (collectedQuantity ?? quantity);
+  bool get isWeighted => unit == 'кг';
+
+  double get pickedQuantity => isUnavailable ? 0 : (collectedQuantity ?? quantity);
 
   bool get isPartial =>
-      !isUnavailable && collectedQuantity != null && collectedQuantity != quantity;
+      !isUnavailable &&
+      collectedQuantity != null &&
+      (collectedQuantity! - quantity).abs() > 0.0005;
 
   double get subtotal => price * pickedQuantity;
 
   double get orderedSubtotal => price * quantity;
+
+  static double roundQuantity(double value) => (value * 1000).round() / 1000;
+
+  String quantityText(double value) {
+    if (!isWeighted) return '${value.round()} шт';
+    final q = roundQuantity(value);
+    final text = q == q.roundToDouble()
+        ? q.toStringAsFixed(0)
+        : q.toStringAsFixed(3).replaceFirst(RegExp(r'0+$'), '').replaceAll('.', ',');
+    return '$text кг';
+  }
 
   factory OrderItem.fromJson(Map<String, dynamic> json) {
     final raw = json['collected_quantity'];
@@ -780,11 +798,12 @@ class OrderItem {
       id: json['id'] ?? 0,
       productId: json['product_id'] ?? '',
       productName: json['product_name'] ?? '',
-      quantity: json['quantity'] ?? 0,
+      quantity: _parseDouble(json['quantity']),
       price: _parseDouble(json['price']),
       isCollected: json['is_collected'] ?? false,
       isUnavailable: json['is_unavailable'] ?? false,
-      collectedQuantity: raw == null ? null : int.tryParse(raw.toString()),
+      collectedQuantity: raw == null ? null : _parseDouble(raw),
+      unit: json['unit']?.toString() == 'кг' ? 'кг' : 'шт',
     );
   }
 
@@ -792,11 +811,11 @@ class OrderItem {
     int? id,
     String? productId,
     String? productName,
-    int? quantity,
+    double? quantity,
     double? price,
     bool? isCollected,
     bool? isUnavailable,
-    int? collectedQuantity,
+    double? collectedQuantity,
     bool resetCollectedQuantity = false,
   }) {
     return OrderItem(
@@ -810,6 +829,7 @@ class OrderItem {
       collectedQuantity: resetCollectedQuantity
           ? null
           : (collectedQuantity ?? this.collectedQuantity),
+      unit: unit,
     );
   }
 }

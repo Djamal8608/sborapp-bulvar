@@ -182,23 +182,25 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
   /// Указать, сколько штук позиции реально нашлось.
   /// Ноль сервер трактует как «товара нет» и исключает позицию из заказа.
-  Future<void> _setQuantity(OrderItem item, int quantity) async {
+  Future<void> _setQuantity(OrderItem item, double quantity) async {
     final order = _order;
     if (order == null) return;
-    if (quantity < 0 || quantity > item.quantity) return;
+    quantity = OrderItem.roundQuantity(quantity);
+    if (quantity < 0 || quantity - item.quantity > 0.0005) return;
 
     final index = _items.indexWhere((e) => e.id == item.id);
     if (index == -1) return;
 
     final previous = _items[index];
-    final full = quantity == item.quantity;
+    final zero = quantity < 0.0005;
+    final full = (quantity - item.quantity).abs() < 0.0005;
 
     setState(() {
       _items[index] = previous.copyWith(
-        isUnavailable: quantity == 0,
-        isCollected: quantity == 0 ? false : previous.isCollected,
+        isUnavailable: zero,
+        isCollected: zero ? false : previous.isCollected,
         collectedQuantity: full ? null : quantity,
-        resetCollectedQuantity: full || quantity == 0,
+        resetCollectedQuantity: full || zero,
       );
     });
 
@@ -628,12 +630,14 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     final removedCount = _items.where((e) => e.isUnavailable).length;
     final shortUnits = _items
-        .where((e) => e.isPartial)
-        .fold<int>(0, (sum, e) => sum + (e.quantity - e.pickedQuantity));
+        .where((e) => e.isPartial && !e.isWeighted)
+        .fold<int>(0, (sum, e) => sum + (e.quantity - e.pickedQuantity).round());
+    final lighterCount = _items.where((e) => e.isPartial && e.isWeighted).length;
 
     final parts = <String>[];
     if (removedCount > 0) parts.add('снято позиций: $removedCount');
     if (shortUnits > 0) parts.add('не хватило $shortUnits шт');
+    if (lighterCount > 0) parts.add('весовых легче заказа: $lighterCount');
 
     final headline = parts.isEmpty
         ? 'Сумма уменьшена на ${order.removedTotal.toStringAsFixed(2)} ₽'
@@ -916,15 +920,18 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '× ${item.pickedQuantity}  •  ${item.price.toStringAsFixed(2)} ₽'
-                '  =  ${item.subtotal.toStringAsFixed(2)} ₽',
+            item.isWeighted
+                ? '${item.quantityText(item.pickedQuantity)}  •  ${item.price.toStringAsFixed(2)} ₽/кг'
+                    '  =  ${item.subtotal.toStringAsFixed(2)} ₽'
+                : '× ${item.pickedQuantity.round()}  •  ${item.price.toStringAsFixed(2)} ₽'
+                    '  =  ${item.subtotal.toStringAsFixed(2)} ₽',
             style: const TextStyle(fontSize: 12),
           ),
           if (item.isPartial)
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
-                'Заказано ${item.quantity} — оплатит '
+                'Заказано ${item.quantityText(item.quantity)} — оплатит '
                     '${item.subtotal.toStringAsFixed(2)} ₽ вместо '
                     '${item.orderedSubtotal.toStringAsFixed(2)} ₽',
                 style: TextStyle(
@@ -946,7 +953,9 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                 ),
               ),
             ),
-          if (!locked && !missing && item.quantity > 1)
+          if (!locked && !missing && item.isWeighted)
+            _buildWeightRow(item),
+          if (!locked && !missing && !item.isWeighted && item.quantity > 1)
             _buildQuantityStepper(item),
         ],
       ),
@@ -981,7 +990,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10),
             child: Text(
-              '$picked из ${item.quantity}',
+              '${picked.round()} из ${item.quantity.round()}',
               style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
             ),
           ),
@@ -994,6 +1003,102 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildWeightRow(OrderItem item) {
+    final weighed = item.quantityText(item.pickedQuantity).replaceAll(' кг', '');
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          const Text('Взвесили:', style: TextStyle(fontSize: 12)),
+          Text(
+            '$weighed из ${item.quantityText(item.quantity)}',
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => _askWeight(item),
+            icon: const Icon(Icons.scale_outlined, size: 18),
+            label: const Text('Указать вес'),
+            style: OutlinedButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _askWeight(OrderItem item) async {
+    final controller = TextEditingController(
+      text: item.quantityText(item.pickedQuantity).replaceAll(' кг', ''),
+    );
+    String? error;
+
+    final result = await showDialog<double>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          void submit() {
+            final value = double.tryParse(controller.text.trim().replaceAll(',', '.'));
+            if (value == null || value <= 0) {
+              setLocal(() => error = 'Введите вес, например 0,46');
+              return;
+            }
+            if (value - item.quantity > 0.0005) {
+              setLocal(() => error = 'Не больше заказанного: ${item.quantityText(item.quantity)}');
+              return;
+            }
+            Navigator.pop(ctx, value);
+          }
+
+          return AlertDialog(
+            title: Text(item.productName),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Заказано ${item.quantityText(item.quantity)}. '
+                    'Если на весах больше — оставьте заказанный вес.'),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(
+                    labelText: 'Фактический вес',
+                    suffixText: 'кг',
+                    errorText: error,
+                    border: const OutlineInputBorder(),
+                  ),
+                  onSubmitted: (_) => submit(),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Отмена'),
+              ),
+              ElevatedButton(
+                onPressed: submit,
+                child: const Text('Сохранить'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    controller.dispose();
+    if (result != null) {
+      await _setQuantity(item, result);
+    }
   }
 
   Widget _stepperButton({required IconData icon, VoidCallback? onTap}) {

@@ -20,6 +20,7 @@ class BackgroundService {
         autoStart: true,
         isForegroundMode: true,
         autoStartOnBoot: true,
+        foregroundServiceTypes: [AndroidForegroundType.specialUse],
       ),
       iosConfiguration: IosConfiguration(
         autoStart: true,
