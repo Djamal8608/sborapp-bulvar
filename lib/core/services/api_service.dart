@@ -64,6 +64,28 @@ class ApiService {
     }
   }
 
+  static Future<List<Order>> getScheduledOrders() async {
+    try {
+      final headers = await _buildHeaders();
+      final response = await http.get(
+        Uri.parse('$_baseUrl/orders_api.php?action=get_scheduled'),
+        headers: headers,
+      ).timeout(_timeout);
+
+      await _checkResponse(response);
+
+      final data = jsonDecode(response.body);
+      final List ordersJson = data['orders'] ?? [];
+      return ordersJson
+          .map((json) => Order.fromJson(json as Map<String, dynamic>))
+          .toList();
+    } on ApiException {
+      rethrow;
+    } catch (e) {
+      throw ApiException('Нет соединения с сервером: $e');
+    }
+  }
+
   static Future<List<Order>> getOrders() async {
     try {
       final headers = await _buildHeaders();
@@ -528,6 +550,10 @@ class Order {
   /// Когда истекает холдирование денег.
   final DateTime? holdExpiresAt;
 
+  final DateTime? scheduledFor;
+  final DateTime? scheduledUntil;
+  final DateTime? releaseAt;
+
   const Order({
     required this.id,
     required this.customerName,
@@ -551,6 +577,9 @@ class Order {
     this.refundDue = 0,
     this.unavailableCount = 0,
     this.holdExpiresAt,
+    this.scheduledFor,
+    this.scheduledUntil,
+    this.releaseAt,
   })  : _paymentState = paymentState,
         originalTotalPrice = originalTotalPrice ?? totalPrice;
 
@@ -613,6 +642,31 @@ class Order {
   /// Состав заказа изменился: что-то не нашлось на полке.
   bool get hasUnavailable => removedTotal > 0 || unavailableCount > 0;
 
+  bool get isTimedDelivery => scheduledFor != null;
+
+  bool get isWaitingRelease => deliveryStatus == 'scheduled';
+
+  static String _hm(DateTime d) =>
+      '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+
+  String get scheduleLabel {
+    final from = scheduledFor;
+    if (from == null) return '';
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final day = DateTime(from.year, from.month, from.day);
+    final diff = day.difference(today).inDays;
+    final dayText = diff == 0
+        ? 'Сегодня'
+        : diff == 1
+            ? 'Завтра'
+            : '${from.day.toString().padLeft(2, '0')}.${from.month.toString().padLeft(2, '0')}';
+    final until = scheduledUntil;
+    return until == null ? '$dayText ${_hm(from)}' : '$dayText ${_hm(from)}–${_hm(until)}';
+  }
+
+  String get releaseLabel => releaseAt == null ? '' : _hm(releaseAt!);
+
   factory Order.fromJson(Map<String, dynamic> json) {
     final rawItems = json['items'] as List? ?? [];
     return Order(
@@ -647,6 +701,15 @@ class Order {
           : 0,
       holdExpiresAt: json['hold_expires_at'] != null
           ? DateTime.tryParse(json['hold_expires_at'].toString())
+          : null,
+      scheduledFor: json['scheduled_for'] != null
+          ? DateTime.tryParse(json['scheduled_for'].toString())
+          : null,
+      scheduledUntil: json['scheduled_until'] != null
+          ? DateTime.tryParse(json['scheduled_until'].toString())
+          : null,
+      releaseAt: json['release_at'] != null
+          ? DateTime.tryParse(json['release_at'].toString())
           : null,
     );
   }
@@ -712,6 +775,9 @@ class Order {
       refundDue: refundDue ?? this.refundDue,
       unavailableCount: unavailableCount ?? this.unavailableCount,
       holdExpiresAt: holdExpiresAt ?? this.holdExpiresAt,
+      scheduledFor: scheduledFor,
+      scheduledUntil: scheduledUntil,
+      releaseAt: releaseAt,
     );
   }
 
@@ -723,6 +789,8 @@ class Order {
       'on_way': 'В пути',
       'delivered': 'Доставлен',
       'canceled': 'Отменен',
+      'cancelled': 'Отменен',
+      'scheduled': 'Ко времени',
     };
     return statuses[deliveryStatus] ?? deliveryStatus;
   }

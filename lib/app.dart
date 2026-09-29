@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:sborapps/core/services/admin_auth_service.dart';
 import 'ui/screens/orders_screen.dart';
 import 'ui/screens/history_screen.dart';
+import 'ui/screens/scheduled_orders_screen.dart';
 import 'ui/screens/profile_screen.dart';
 import 'ui/drawer/admin_login_screen.dart';
 import 'ui/drawer/picker_drawer.dart';
@@ -128,8 +129,15 @@ class _MainScaffoldState extends State<MainScaffold>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
+    _tabController.addListener(() {
+      if (_tabController.index != _selectedIndex) {
+        setState(() => _selectedIndex = _tabController.index);
+      }
+    });
   }
+
+  static const List<String> _tabTitles = ['Заказы', 'Запланированные', 'История'];
 
   @override
   void dispose() {
@@ -151,7 +159,6 @@ class _MainScaffoldState extends State<MainScaffold>
     final appBarTitleSize = isVerySmallHeight ? 16.0 : 18.0;
     final avatarRadius = isVerySmallHeight ? 14.0 : 18.0;
     final iconSize = isVerySmallHeight ? 18.0 : 20.0;
-    final tabIconSize = isVerySmallHeight ? 18.0 : 24.0;
     final tabFontSize = isVerySmallHeight ? 10.0 : 14.0;
 
     // Показывать текст в табах только если достаточно места
@@ -166,7 +173,7 @@ class _MainScaffoldState extends State<MainScaffold>
           });
         },
         onOrdersTap: () => _switchToTab(0),
-        onHistoryTap: () => _switchToTab(1),
+        onHistoryTap: () => _switchToTab(2),
         onProfileTap: () {
           Navigator.pop(context);
           Navigator.of(context).pushNamed('/profile');
@@ -205,7 +212,7 @@ class _MainScaffoldState extends State<MainScaffold>
                       Expanded(
                         child: Center(
                           child: Text(
-                            _selectedIndex == 0 ? 'Заказы' : 'История',
+                            _tabTitles[_selectedIndex],
                             style: TextStyle(
                               color: Colors.white,
                               fontSize: appBarTitleSize,
@@ -254,14 +261,9 @@ class _MainScaffoldState extends State<MainScaffold>
                     indicatorSize: TabBarIndicatorSize.tab,
                     labelPadding: EdgeInsets.zero,
                     tabs: [
-                      Tab(
-                        icon: Icon(Icons.list_alt, size: tabIconSize),
-                        text: showTabText ? 'Заказы' : null,
-                      ),
-                      Tab(
-                        icon: Icon(Icons.history, size: tabIconSize),
-                        text: showTabText ? 'История' : null,
-                      ),
+                      _buildTab(Icons.list_alt, 'Заказы', showTabText, isVerySmallHeight),
+                      _buildTab(Icons.schedule, 'Запланированные', showTabText, isVerySmallHeight),
+                      _buildTab(Icons.history, 'История', showTabText, isVerySmallHeight),
                     ],
                   ),
                 ),
@@ -274,8 +276,27 @@ class _MainScaffoldState extends State<MainScaffold>
         controller: _tabController,
         children: const [
           OrdersScreen(),
+          ScheduledOrdersScreen(),
           HistoryScreen(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildTab(IconData icon, String label, bool showText, bool verySmall) {
+    final height = verySmall ? 36.0 : 48.0;
+    if (!showText) {
+      return Tab(height: height, icon: Icon(icon, size: verySmall ? 18.0 : 22.0));
+    }
+    return Tab(
+      height: height,
+      iconMargin: const EdgeInsets.only(bottom: 2),
+      icon: Icon(icon, size: 20),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 12),
       ),
     );
   }

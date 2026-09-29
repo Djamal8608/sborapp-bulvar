@@ -452,6 +452,19 @@ class OrderCard extends StatelessWidget {
               ),
               SizedBox(height: sectionSpacing),
 
+              if (order.isTimedDelivery) ...[
+                _buildInfoRow(
+                  icon: Icons.schedule,
+                  text: order.isWaitingRelease
+                      ? 'Ко времени: ${order.scheduleLabel} · сборка с ${order.releaseLabel}'
+                      : 'Доставить: ${order.scheduleLabel}',
+                  iconSize: iconSize,
+                  fontSize: bodyFontSize,
+                  maxLines: 2,
+                ),
+                SizedBox(height: sectionSpacing / 2),
+              ],
+
               _buildInfoRow(
                 icon: Icons.person,
                 text: order.customerName,
@@ -680,6 +693,8 @@ class OrderCard extends StatelessWidget {
     switch (status) {
       case 'new':
         return Colors.red;
+      case 'scheduled':
+        return Colors.teal;
       case 'processing':
         return Colors.orange;
       case 'packed':

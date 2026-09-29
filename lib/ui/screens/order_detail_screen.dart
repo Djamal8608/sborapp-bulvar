@@ -705,6 +705,49 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     );
   }
 
+  Widget _buildScheduleBanner() {
+    final order = _order!;
+    final waiting = order.isWaitingRelease;
+    final color = waiting ? Colors.teal : Colors.indigo;
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.4)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.schedule, color: color),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Доставка ко времени: ${order.scheduleLabel}',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: color.shade800,
+                  ),
+                ),
+                if (waiting && order.releaseLabel.isNotEmpty)
+                  Text(
+                    'Сборка откроется в ${order.releaseLabel}',
+                    style: TextStyle(fontSize: 13, color: color.shade800),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildOrderInfoCard(
       int collectedCount,
       int totalCount,
@@ -722,6 +765,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _buildPaymentBanner(),
+            if (_order!.isTimedDelivery) _buildScheduleBanner(),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -856,7 +900,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     return Column(
       children: [
-        if (!_canEdit)
+        if (!_canEdit && _order?.status != 'scheduled')
           Container(
             width: double.infinity,
             margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
@@ -1135,7 +1179,13 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     final VoidCallback? action;
     final Color? color;
 
-    if (nothingLeft && !_beforePicking.contains(status)) {
+    if (status == 'scheduled') {
+      final opensAt = _order?.releaseLabel ?? '';
+      label = opensAt.isNotEmpty ? 'Сборка откроется в $opensAt' : 'Заказ ко времени';
+      icon = Icons.schedule;
+      action = null;
+      color = null;
+    } else if (nothingLeft && !_beforePicking.contains(status)) {
       // Собирать нечего — все позиции отмечены отсутствующими.
       // Отправлять пустой заказ курьеру бессмысленно, остаётся отменить.
       label = 'Отменить заказ';
