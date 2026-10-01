@@ -513,7 +513,6 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.qr_code_scanner),
-            // Сканирование тоже меняет состав — после отправки сервер откажет.
             onPressed: (_order != null && _isPicking) ? _openScanner : null,
             tooltip: 'Сканировать',
           ),
@@ -524,11 +523,17 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           ),
         ],
       ),
-      body: _buildBody(),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          // Определяем компактный режим для узких экранов
+          final isCompact = constraints.maxWidth < 400;
+          return _buildBody(isCompact);
+        },
+      ),
     );
   }
 
-  Widget _buildBody() {
+  Widget _buildBody(bool isCompact) {
     if (_isInitialLoading) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -542,8 +547,6 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       return const Center(child: Text('Заказ не найден'));
     }
 
-    // Отсутствующие позиции не участвуют в прогрессе: собрать их нельзя,
-    // и если оставить их в знаменателе, заказ никогда не дойдёт до 100%.
     final active = _items.where((e) => !e.isUnavailable).toList();
     final collectedCount = active.where((e) => e.isCollected).length;
     final totalCount = active.length;
@@ -553,14 +556,21 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     return Column(
       children: [
-        _buildOrderInfoCard(collectedCount, totalCount, progressValue),
-        Expanded(child: _buildItemsList()),
+        Expanded(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              _buildOrderInfoCard(collectedCount, totalCount, progressValue, isCompact),
+              _buildItemsListContent(isCompact),
+            ],
+          ),
+        ),
         _buildCompleteButton(allCollected, nothingLeft),
       ],
     );
   }
 
-  Widget _buildPaymentBanner() {
+  Widget _buildPaymentBanner(bool isCompact) {
     final order = _order;
     if (order == null) return const SizedBox.shrink();
 
@@ -583,8 +593,11 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      margin: EdgeInsets.only(bottom: isCompact ? 8 : 12),
+      padding: EdgeInsets.symmetric(
+        horizontal: isCompact ? 10 : 12,
+        vertical: isCompact ? 8 : 10,
+      ),
       decoration: BoxDecoration(
         color: color.withOpacity(0.12),
         borderRadius: BorderRadius.circular(10),
@@ -592,8 +605,8 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       ),
       child: Row(
         children: [
-          Icon(icon, color: color.shade800, size: 22),
-          const SizedBox(width: 10),
+          Icon(icon, color: color.shade800, size: isCompact ? 18 : 22),
+          SizedBox(width: isCompact ? 8 : 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -603,14 +616,19 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   order.paymentLabel,
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
-                    fontSize: 15,
+                    fontSize: isCompact ? 13 : 15,
                     color: color.shade800,
                   ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                Text(
-                  order.paymentHint,
-                  style: TextStyle(fontSize: 13, color: color.shade800),
-                ),
+                if (!isCompact)
+                  Text(
+                    order.paymentHint,
+                    style: TextStyle(fontSize: 13, color: color.shade800),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
               ],
             ),
           ),
@@ -622,7 +640,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   /// Пояснение под суммой: что снято и что с деньгами.
   /// Для оплаченных онлайн возврат пока оформляется вручную —
   /// автоматического частичного возврата ещё нет.
-  Widget _buildUnavailableNote() {
+  Widget _buildUnavailableNote(bool isCompact) {
     final order = _order;
     if (order == null) return const SizedBox.shrink();
 
@@ -645,7 +663,10 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      padding: EdgeInsets.symmetric(
+        horizontal: isCompact ? 8 : 10,
+        vertical: isCompact ? 6 : 8,
+      ),
       decoration: BoxDecoration(
         color: Colors.red.withOpacity(0.08),
         borderRadius: BorderRadius.circular(8),
@@ -657,17 +678,22 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           Text(
             headline[0].toUpperCase() + headline.substring(1),
             style: TextStyle(
-              fontSize: 13,
+              fontSize: isCompact ? 12 : 13,
               fontWeight: FontWeight.w600,
               color: Colors.red[800],
             ),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
           ),
-          const SizedBox(height: 2),
+          if (!isCompact)
+            const SizedBox(height: 2),
           Text(
             refund > 0
                 ? 'Оплачено онлайн — возврат ${refund.toStringAsFixed(2)} ₽ оформляет магазин'
                 : 'Взять с клиента: ${order.totalPrice.toStringAsFixed(2)} ₽',
-            style: TextStyle(fontSize: 12, color: Colors.red[800]),
+            style: TextStyle(fontSize: isCompact ? 11 : 12, color: Colors.red[800]),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
           ),
         ],
       ),
@@ -752,20 +778,20 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       int collectedCount,
       int totalCount,
       double progressValue,
+      bool isCompact,
       ) {
     if (_order == null) return const SizedBox.shrink();
 
     return Card(
-      margin: const EdgeInsets.all(12),
+      margin: EdgeInsets.all(isCompact ? 8 : 12),
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: EdgeInsets.all(isCompact ? 12 : 16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buildPaymentBanner(),
-            if (_order!.isTimedDelivery) _buildScheduleBanner(),
+            _buildPaymentBanner(isCompact),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -776,23 +802,29 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                     children: [
                       Text(
                         _order!.customerName,
-                        style: const TextStyle(
-                          fontSize: 16,
+                        style: TextStyle(
+                          fontSize: isCompact ? 14 : 16,
                           fontWeight: FontWeight.bold,
                         ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      const SizedBox(height: 4),
+                      SizedBox(height: isCompact ? 2 : 4),
                       Row(
                         children: [
-                          const Icon(Icons.phone, size: 14, color: Colors.grey),
-                          const SizedBox(width: 4),
-                          Text(
-                            _order!.customerPhone.isNotEmpty
-                                ? _order!.customerPhone
-                                : 'Нет номера',
-                            style: const TextStyle(
-                              color: Colors.grey,
-                              fontSize: 13,
+                          Icon(Icons.phone, size: isCompact ? 12 : 14, color: Colors.grey),
+                          SizedBox(width: isCompact ? 2 : 4),
+                          Expanded(
+                            child: Text(
+                              _order!.customerPhone.isNotEmpty
+                                  ? _order!.customerPhone
+                                  : 'Нет номера',
+                              style: TextStyle(
+                                color: Colors.grey,
+                                fontSize: isCompact ? 12 : 13,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
                         ],
@@ -800,24 +832,24 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                     ],
                   ),
                 ),
-                // Цена: если что-то сняли, показываем и старую сумму —
-                // сборщик должен взять с клиента именно новую.
+                SizedBox(width: isCompact ? 8 : 16),
+                // Цена
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     if (_order!.hasUnavailable)
                       Text(
                         '${_order!.originalTotalPrice.toStringAsFixed(2)} ₽',
-                        style: const TextStyle(
-                          fontSize: 13,
+                        style: TextStyle(
+                          fontSize: isCompact ? 11 : 13,
                           color: Colors.grey,
                           decoration: TextDecoration.lineThrough,
                         ),
                       ),
                     Text(
                       '${_order!.totalPrice.toStringAsFixed(2)} ₽',
-                      style: const TextStyle(
-                        fontSize: 18,
+                      style: TextStyle(
+                        fontSize: isCompact ? 16 : 18,
                         fontWeight: FontWeight.bold,
                         color: Colors.green,
                       ),
@@ -827,51 +859,112 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
               ],
             ),
             if (_order!.hasUnavailable) ...[
-              const SizedBox(height: 8),
-              _buildUnavailableNote(),
+              SizedBox(height: isCompact ? 6 : 8),
+              _buildUnavailableNote(isCompact),
             ],
             if (_order!.address.isNotEmpty) ...[
-              const SizedBox(height: 8),
+              SizedBox(height: isCompact ? 6 : 8),
               Row(
                 children: [
-                  const Icon(Icons.location_on, size: 14, color: Colors.grey),
-                  const SizedBox(width: 4),
+                  Icon(Icons.location_on, size: isCompact ? 12 : 14, color: Colors.grey),
+                  SizedBox(width: isCompact ? 2 : 4),
                   Expanded(
                     child: Text(
                       _order!.address,
-                      style: const TextStyle(color: Colors.grey, fontSize: 13),
-                      maxLines: 2,
+                      style: TextStyle(
+                        color: Colors.grey,
+                        fontSize: isCompact ? 12 : 13,
+                      ),
+                      maxLines: isCompact ? 1 : 2,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ],
               ),
             ],
-            const SizedBox(height: 12),
+
+            if (_order!.comment.trim().isNotEmpty) ...[
+              SizedBox(height: isCompact ? 6 : 8),
+              Container(
+                width: double.infinity,
+                padding: EdgeInsets.symmetric(
+                  horizontal: isCompact ? 8 : 10,
+                  vertical: isCompact ? 6 : 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.deepOrange.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.deepOrange.withOpacity(0.35)),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: EdgeInsets.only(top: 2),
+                      child: Icon(
+                        Icons.comment_outlined,
+                        size: isCompact ? 14 : 16,
+                        color: Colors.deepOrange[700],
+                      ),
+                    ),
+                    SizedBox(width: isCompact ? 6 : 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Комментарий к заказу',
+                            style: TextStyle(
+                              fontSize: isCompact ? 11 : 12,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.deepOrange[800],
+                            ),
+                          ),
+                          SizedBox(height: 2),
+                          Text(
+                            _order!.comment.trim(),
+                            style: TextStyle(
+                              fontSize: isCompact ? 12 : 13,
+                              color: Colors.deepOrange[900],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+
+            SizedBox(height: isCompact ? 8 : 12),
+            // Прогресс сборки
+
+
+            SizedBox(height: isCompact ? 8 : 12),
             // Прогресс сборки
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
                   'Собрано: $collectedCount из $totalCount',
-                  style: const TextStyle(fontSize: 13),
+                  style: TextStyle(fontSize: isCompact ? 12 : 13),
                 ),
                 Text(
                   '${(progressValue * 100).round()}%',
                   style: TextStyle(
-                    fontSize: 13,
+                    fontSize: isCompact ? 12 : 13,
                     fontWeight: FontWeight.bold,
                     color: progressValue == 1.0 ? Colors.green : Colors.blue,
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 6),
+            SizedBox(height: isCompact ? 4 : 6),
             ClipRRect(
               borderRadius: BorderRadius.circular(8),
               child: LinearProgressIndicator(
                 value: progressValue,
-                minHeight: 8,
+                minHeight: isCompact ? 6 : 8,
                 backgroundColor: Colors.grey[300],
                 valueColor: AlwaysStoppedAnimation(
                   progressValue == 1.0 ? Colors.green : Colors.blue,
@@ -900,7 +993,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     return Column(
       children: [
-        if (!_canEdit && _order?.status != 'scheduled')
+        if (!_canEdit)
           Container(
             width: double.infinity,
             margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
@@ -928,6 +1021,64 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             itemCount: _items.length,
             separatorBuilder: (_, __) => const Divider(height: 1),
             itemBuilder: (context, index) => _buildItemTile(_items[index]),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildItemsListContent(bool isCompact) {
+    if (_items.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(32),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.inbox_rounded, size: 64, color: Colors.grey),
+              const SizedBox(height: 16),
+              const Text('В заказе нет товаров'),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      children: [
+        if (!_canEdit)
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.grey[200],
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.lock_outline, size: 18, color: Colors.grey[700]),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Заказ уже отправлен — состав и сумму изменить нельзя',
+                    style: TextStyle(fontSize: 13, color: Colors.grey[800]),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ...List.generate(
+          _items.length,
+              (index) => Column(
+            children: [
+              _buildItemTile(_items[index]),
+              if (index < _items.length - 1)
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12),
+                  child: Divider(height: 1),
+                ),
+            ],
           ),
         ),
       ],

@@ -529,6 +529,7 @@ class Order {
   final bool isPaidOnline;
   final String _paymentState;
   final String address;
+  final String comment;
   final List<OrderItem> items;
   final DateTime createdAt;
   final int? itemsCount;
@@ -567,6 +568,7 @@ class Order {
     this.isPaidOnline = false,
     String paymentState = 'on_delivery',
     required this.address,
+    this.comment = '',
     this.items = const [],
     required this.createdAt,
     this.itemsCount,
@@ -682,6 +684,7 @@ class Order {
       isPaidOnline: json['is_paid_online'] == true,
       paymentState: json['payment_state']?.toString() ?? 'on_delivery',
       address: json['address'] ?? '',
+      comment: json['comment']?.toString() ?? '',
       items: rawItems
           .map((x) => OrderItem.fromJson(x as Map<String, dynamic>))
           .toList(),
@@ -741,6 +744,7 @@ class Order {
     String? paymentMethod,
     bool? isPaidOnline,
     String? address,
+    String? comment,
     List<OrderItem>? items,
     DateTime? createdAt,
     int? itemsCount,
@@ -765,6 +769,7 @@ class Order {
       isPaidOnline: isPaidOnline ?? this.isPaidOnline,
       paymentState: _paymentState,
       address: address ?? this.address,
+      comment: comment ?? this.comment,
       items: items ?? this.items,
       createdAt: createdAt ?? this.createdAt,
       itemsCount: itemsCount ?? this.itemsCount,
