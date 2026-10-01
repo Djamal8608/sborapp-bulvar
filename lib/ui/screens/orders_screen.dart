@@ -4,7 +4,6 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:sborapps/core/services/api_service.dart';
 import 'package:sborapps/core/services/push_notification_service.dart';
 import 'package:sborapps/ui/screens/order_detail_screen.dart';
-import 'dart:io';
 
 class OrdersScreen extends StatefulWidget {
   const OrdersScreen({Key? key}) : super(key: key);
@@ -55,89 +54,134 @@ class _OrdersScreenState extends State<OrdersScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+
     _messageSubscription?.cancel();
     _openedAppSubscription?.cancel();
+
+    final pushService = PushNotificationService.instance;
+
+    if (pushService.onLocalNotificationTap == _handleLocalNotificationTap) {
+      pushService.onLocalNotificationTap = null;
+    }
+
     super.dispose();
   }
 
-  /// ✅ Возврат из фона — тихо обновляем список
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
+
     if (state == AppLifecycleState.resumed) {
       _silentRefresh();
+      _registerDeviceToken();
     }
   }
 
   /// Настройка подписок на push-уведомления
   void _setupPushNotifications() {
-    // 1. Foreground: уведомление пришло, пока приложение открыто
+    // Сервис показывает foreground-уведомление.
+    // Здесь только обновляем список заказов.
     _messageSubscription = FirebaseMessaging.onMessage.listen((message) {
-      final type = message.data['type'];
-      debugPrint('📩 [OrdersScreen] Foreground push: type=$type, data=${message.data}');
+      if (!mounted) return;
 
-      // Обновляем список только для уведомлений о новых заказах
-      if (type == 'new_order' || type == 'order_updated') {
+      final type = message.data['type']?.toString();
+
+      debugPrint('[OrdersScreen] Foreground push: type=$type');
+
+      if (
+      type == 'new_order' ||
+          type == 'order_reminder' ||
+          type == 'order_updated' ||
+          type == 'order_accepted' ||
+          type == 'order_rejected') {
         _silentRefresh();
       }
     });
 
-    // 2. Тап по уведомлению, когда приложение было в фоне
+    // Нажатие на системное FCM-уведомление из фона.
     _openedAppSubscription =
         FirebaseMessaging.onMessageOpenedApp.listen((message) {
-          debugPrint('👆 [OrdersScreen] Тап по уведомлению: ${message.data}');
+          if (!mounted) return;
+
           _handleNotificationTap(message);
         });
 
-    // 3. Приложение было полностью закрыто и открыто через уведомление
+    // Нажатие на локальное foreground-уведомление.
+    PushNotificationService.instance.onLocalNotificationTap =
+        _handleLocalNotificationTap;
+
+    // Запуск закрытого приложения через системное FCM-уведомление.
     FirebaseMessaging.instance.getInitialMessage().then((message) {
-      if (message != null) {
-        debugPrint('🚀 [OrdersScreen] Открыто из уведомления: ${message.data}');
-        // Небольшая задержка, чтобы UI успел построиться
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _handleNotificationTap(message);
-        });
-      }
+      if (!mounted || message == null) return;
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+
+        _handleNotificationTap(message);
+      });
+    }).catchError((Object error) {
+      debugPrint(
+        '[OrdersScreen] Ошибка getInitialMessage: $error',
+      );
     });
   }
 
   /// Обработка тапа по уведомлению — навигация на конкретный заказ
+  // Нажатие на системное FCM-уведомление.
   void _handleNotificationTap(RemoteMessage message) {
-    final orderIdStr = message.data['order_id'];
-    if (orderIdStr == null) {
-      // Нет ID заказа — просто обновляем список
-      _silentRefresh();
-      return;
-    }
+    if (!mounted) return;
 
-    final orderId = int.tryParse(orderIdStr.toString());
-    if (orderId == null) {
-      _silentRefresh();
-      return;
-    }
+    final orderId = int.tryParse(
+      message.data['order_id']?.toString() ?? '',
+    );
 
-    // Обновляем список и открываем детали заказа
     _silentRefresh();
-    _openOrderDetail(orderId);
+
+    if (orderId != null) {
+      _openOrderDetail(orderId);
+    }
   }
 
-  /// Отправить device token на бэкенд (один раз при входе)
-  Future<void> _registerDeviceToken() async {
-    final token = PushNotificationService.instance.deviceToken;
-    if (token == null || token.isEmpty) {
-      debugPrint('⚠ [OrdersScreen] FCM токен пуст, пропускаем регистрацию');
-      return;
-    }
+// Нажатие на локальное уведомление, показанное сервисом.
+  void _handleLocalNotificationTap(int orderId) {
+    if (!mounted) return;
 
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      _silentRefresh();
+      _openOrderDetail(orderId);
+    });
+
+    // Запрашиваем кадр, чтобы callback выполнился и при статичном UI.
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+// Регистрация текущего токена после входа и при возврате в приложение.
+  Future<void> _registerDeviceToken() async {
     try {
-      await ApiService.registerDeviceToken(
-        token: token,
-        platform: Platform.isIOS ? 'ios' : 'android',
-      );
-      debugPrint('✅ [OrdersScreen] FCM токен зарегистрирован на бэкенде');
+      final pushService = PushNotificationService.instance;
+
+      // Firebase.initializeApp() должен быть выполнен ранее в main().
+      await pushService.initialize();
+
+      if (!mounted) return;
+
+      await pushService.registerCurrentDeviceToken();
+
+      if (!mounted) return;
+
+      // Приложение могло запуститься через локальное уведомление
+      // до появления OrdersScreen.
+      final pendingOrderId = pushService.takePendingLocalOrderId();
+
+      if (pendingOrderId != null) {
+        _handleLocalNotificationTap(pendingOrderId);
+      }
     } catch (e) {
-      debugPrint('⚠ [OrdersScreen] Не удалось отправить токен: $e');
-      // Не критично — попробуем при следующем запуске
+      debugPrint(
+        '[OrdersScreen] Ошибка настройки push или регистрации токена: $e',
+      );
     }
   }
 
@@ -165,16 +209,24 @@ class _OrdersScreenState extends State<OrdersScreen>
   }
 
   Future<void> _openOrderDetail(int orderId) async {
-    final result = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(
-        builder: (context) => OrderDetailScreen(orderId: orderId),
-      ),
-    );
-    if (result == true) {
-      setState(() {
-        _ordersFuture = ApiService.getOrders();
-      });
+    if (!mounted) return;
+
+    try {
+      await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (context) => OrderDetailScreen(orderId: orderId),
+        ),
+      );
+
+      if (!mounted) return;
+
+      // После возвращения обновляем данные независимо от результата.
+      await _silentRefresh();
+    } catch (e) {
+      debugPrint(
+        '[OrdersScreen] Ошибка открытия заказа #$orderId: $e',
+      );
     }
   }
 

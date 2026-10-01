@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
 
@@ -7,39 +8,84 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import 'package:sborapps/core/services/api_service.dart';
 import 'package:sborapps/firebase_options.dart';
 
 class PushNotificationService {
   PushNotificationService._();
 
-  static final PushNotificationService instance = PushNotificationService._();
+  static final PushNotificationService instance =
+  PushNotificationService._();
 
   final FirebaseMessaging _messaging = FirebaseMessaging.instance;
+
   final FlutterLocalNotificationsPlugin _localNotifications =
   FlutterLocalNotificationsPlugin();
 
+  // Этот ID совпадает с channel_id в PHP NotificationService.
   static const String _ordersChannelId = 'orders_channel';
-  static const String _ordersChannelName = 'Новые заказы';
+  static const String _ordersChannelName = 'Заказы';
   static const String _ordersChannelDescription =
-      'Уведомления о новых заказах';
+      'Новые заказы и напоминания о непринятых заказах';
 
   static const String _serviceChannelId = 'orders_service_channel';
   static const int _serviceNotificationId = 888;
+
+  StreamSubscription<RemoteMessage>? _messageSubscription;
+  StreamSubscription<String>? _tokenRefreshSubscription;
 
   String? _deviceToken;
   String? get deviceToken => _deviceToken;
 
   bool _initialized = false;
+  Future<void>? _initializationFuture;
 
-  /// Вызывать после Firebase.initializeApp() в main().
+  // Не используем ID уведомления фонового сервиса.
+  int _notificationCounter = 10000;
+
+  // Необязательный обработчик нажатия на локальное уведомление.
+  // Навигацию назначает приложение, у которого есть BuildContext.
+  void Function(int orderId)? onLocalNotificationTap;
+
+  int? _pendingLocalOrderId;
+
+  /// Получить заказ, открытый локальным уведомлением до готовности UI.
+  /// После чтения значение очищается.
+  int? takePendingLocalOrderId() {
+    final orderId = _pendingLocalOrderId;
+    _pendingLocalOrderId = null;
+    return orderId;
+  }
+
+  /// Вызывать после Firebase.initializeApp().
   Future<void> initialize() async {
-    if (_initialized) return;
+    if (_initialized) {
+      return;
+    }
 
+    final runningInitialization = _initializationFuture;
+    if (runningInitialization != null) {
+      await runningInitialization;
+      return;
+    }
+
+    final initialization = _initializeInternal();
+    _initializationFuture = initialization;
+
+    try {
+      await initialization;
+    } finally {
+      _initializationFuture = null;
+    }
+  }
+
+  Future<void> _initializeInternal() async {
     await _requestPermissions();
     await _initLocalNotifications();
 
     if (Platform.isIOS) {
-      // Foreground FCM показываем через локальное уведомление, без дубля.
+      // Показываем foreground FCM через локальные уведомления.
+      // Отключаем второй, системный foreground-показ.
       await _messaging.setForegroundNotificationPresentationOptions(
         alert: false,
         badge: false,
@@ -47,22 +93,25 @@ class PushNotificationService {
       );
     }
 
-    _messaging.onTokenRefresh.listen((newToken) {
-      _deviceToken = newToken;
-      debugPrint('FCM токен обновлён: $newToken');
-      // TODO: Отправить новый токен на свой сервер.
-    });
-
     _setupMessageHandlers();
-    _initialized = true;
+    _setupTokenRefreshHandler();
+
     await _getToken();
+
+    _initialized = true;
+    debugPrint('[Push] Сервис уведомлений инициализирован');
   }
 
   Future<void> _requestPermissions() async {
-    await _messaging.requestPermission(
+    final settings = await _messaging.requestPermission(
       alert: true,
       badge: true,
       sound: true,
+    );
+
+    debugPrint(
+      '[Push] Разрешение на уведомления: '
+          '${settings.authorizationStatus}',
     );
   }
 
@@ -82,6 +131,10 @@ class PushNotificationService {
     );
 
     if (Platform.isAndroid) {
+      final androidPlugin =
+      _localNotifications.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+
       const ordersChannel = AndroidNotificationChannel(
         _ordersChannelId,
         _ordersChannelName,
@@ -91,64 +144,168 @@ class PushNotificationService {
         enableVibration: true,
       );
 
-      final androidPlugin = _localNotifications
-          .resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin>();
       await androidPlugin?.createNotificationChannel(ordersChannel);
     }
 
+    // Запуск приложения через локальное уведомление.
     final launchDetails =
     await _localNotifications.getNotificationAppLaunchDetails();
+
     if (launchDetails?.didNotificationLaunchApp ?? false) {
+      final payload = launchDetails?.notificationResponse?.payload;
+      _pendingLocalOrderId = int.tryParse(payload ?? '');
+
       debugPrint(
-        'Открыто из локального уведомления: '
-            '${launchDetails?.notificationResponse?.payload}',
+        '[Push] Запуск из локального уведомления: '
+            'orderId=$_pendingLocalOrderId',
       );
     }
   }
 
   void _onNotificationTapped(NotificationResponse response) {
-    debugPrint('Тап по локальному уведомлению: ${response.payload}');
-    // TODO: Открыть заказ по order_id из response.payload.
+    final orderId = int.tryParse(response.payload ?? '');
+
+    if (orderId == null) {
+      return;
+    }
+
+    debugPrint('[Push] Тап по локальному уведомлению: orderId=$orderId');
+
+    final callback = onLocalNotificationTap;
+
+    if (callback != null) {
+      callback(orderId);
+    } else {
+      _pendingLocalOrderId = orderId;
+    }
+
+    // Нажатие не означает принятие заказа.
+    // Повторы прекращает сервер после изменения orders.status.
   }
 
   Future<void> _getToken() async {
     try {
       _deviceToken = await _messaging.getToken();
-      debugPrint('FCM токен устройства: $_deviceToken');
-      // TODO: Отправить токен на свой сервер.
+
+      if (_deviceToken == null || _deviceToken!.isEmpty) {
+        debugPrint('[Push] FCM токен пока недоступен');
+        return;
+      }
+
+      debugPrint('[Push] FCM токен получен');
+
+      // Первичную регистрацию после входа выполняет OrdersScreen.
+      // Здесь не отправляем запрос, поскольку пользователь
+      // во время initialize() может быть ещё не авторизован.
     } catch (e) {
-      debugPrint('Ошибка получения FCM токена: $e');
+      debugPrint('[Push] Ошибка получения FCM токена: $e');
+    }
+  }
+
+  void _setupTokenRefreshHandler() {
+    if (_tokenRefreshSubscription != null) {
+      return;
+    }
+
+    _tokenRefreshSubscription = _messaging.onTokenRefresh.listen(
+          (newToken) async {
+        _deviceToken = newToken;
+
+        debugPrint('[Push] FCM токен обновлён');
+
+        await _registerTokenOnServer(newToken);
+      },
+      onError: (Object error) {
+        debugPrint('[Push] Ошибка обновления FCM токена: $error');
+      },
+    );
+  }
+
+  Future<void> _registerTokenOnServer(String token) async {
+    if (token.isEmpty) {
+      return;
+    }
+
+    try {
+      await ApiService.registerDeviceToken(
+        token: token,
+        platform: Platform.isIOS ? 'ios' : 'android',
+      );
+
+      debugPrint('[Push] FCM токен зарегистрирован на сервере');
+    } catch (e) {
+      // Например, пользователь ещё не вошёл.
+      // Повторить регистрацию можно после авторизации.
+      debugPrint('[Push] Не удалось зарегистрировать FCM токен: $e');
+    }
+  }
+
+  /// Можно вызывать после авторизации или при возврате в приложение.
+  Future<void> registerCurrentDeviceToken() async {
+    try {
+      final token = await _messaging.getToken();
+
+      if (token == null || token.isEmpty) {
+        debugPrint('[Push] Нет FCM токена для регистрации');
+        return;
+      }
+
+      _deviceToken = token;
+
+      await _registerTokenOnServer(token);
+    } catch (e) {
+      debugPrint('[Push] Ошибка регистрации текущего FCM токена: $e');
     }
   }
 
   void _setupMessageHandlers() {
-    FirebaseMessaging.onMessage.listen((message) {
-      debugPrint('Foreground сообщение: ${message.notification?.title}');
-      _showLocalNotification(message).catchError((Object error) {
-        debugPrint('Ошибка показа уведомления: $error');
-      });
-    });
+    if (_messageSubscription != null) {
+      return;
+    }
 
-    FirebaseMessaging.onMessageOpenedApp.listen((message) {
-      debugPrint('Тап по FCM уведомлению из фона: ${message.data}');
-      // TODO: Открыть заказ по message.data['order_id'].
-    });
+    // Только показ foreground-уведомления.
+    // OrdersScreen отдельно обновляет список заказов.
+    _messageSubscription = FirebaseMessaging.onMessage.listen(
+          (message) async {
+        debugPrint(
+          '[Push] Foreground FCM: '
+              'type=${message.data['type']}, '
+              'orderId=${message.data['order_id']}',
+        );
 
-    _messaging.getInitialMessage().then((message) {
-      if (message != null) {
-        debugPrint('Открыто из FCM уведомления: ${message.data}');
-        // TODO: Открыть заказ по message.data['order_id'].
-      }
-    }).catchError((Object error) {
-      debugPrint('Ошибка getInitialMessage: $error');
-    });
+        try {
+          await _showLocalNotification(message);
+        } catch (e) {
+          debugPrint('[Push] Ошибка показа уведомления: $e');
+        }
+      },
+      onError: (Object error) {
+        debugPrint('[Push] Ошибка получения foreground FCM: $error');
+      },
+    );
+
+    // onMessageOpenedApp и getInitialMessage остаются в OrdersScreen.
+    // Здесь не добавляем дублирующие обработчики.
+  }
+
+  int _nextNotificationId() {
+    _notificationCounter++;
+
+    if (_notificationCounter >= 2147483647) {
+      _notificationCounter = 10000;
+    }
+
+    return _notificationCounter;
   }
 
   Future<void> _showLocalNotification(RemoteMessage message) async {
     final notification = message.notification;
+
     if (notification == null) {
-      debugPrint('FCM сообщение без notification payload: ${message.data}');
+      debugPrint(
+        '[Push] Сообщение без notification payload: '
+            'type=${message.data['type']}',
+      );
       return;
     }
 
@@ -159,6 +316,11 @@ class PushNotificationService {
         channelDescription: _ordersChannelDescription,
         importance: Importance.max,
         priority: Priority.high,
+        playSound: true,
+        enableVibration: true,
+        onlyAlertOnce: false,
+        ongoing: false,
+        autoCancel: true,
       ),
       iOS: DarwinNotificationDetails(
         presentAlert: true,
@@ -167,24 +329,44 @@ class PushNotificationService {
       ),
     );
 
-    final id = DateTime.now().millisecondsSinceEpoch.remainder(2147483647);
-    final payload = message.data['order_id']?.toString();
+    final id = _nextNotificationId();
 
     await _localNotifications.show(
       id: id,
       title: notification.title,
       body: notification.body,
       notificationDetails: details,
-      payload: payload,
+      payload: message.data['order_id']?.toString(),
     );
 
-    debugPrint('Локальное уведомление показано: id=$id');
+    debugPrint('[Push] Локальное уведомление показано: id=$id');
   }
 
-  /// Не нужен для обычной доставки FCM. Запускать отдельно,
-  /// только если есть реальная длительная задача синхронизации на Android.
+  // Методы совместимости со старым OrdersScreen.
+  // Локальные таймеры отключены: повторы выполняет PHP cron.
+
+  void startReminderForOrder(
+      int orderId,
+      String title,
+      String body,
+      ) {
+    // Намеренно ничего не запускаем.
+  }
+
+  void stopReminderForOrder(int orderId) {
+    // Локальных таймеров больше нет.
+  }
+
+  void stopAllReminders() {
+    // Локальных таймеров больше нет.
+  }
+
+  /// Сохранён для совместимости.
+  /// Не вызывать только ради получения push.
   Future<void> startForegroundService() async {
-    if (!Platform.isAndroid) return;
+    if (!Platform.isAndroid) {
+      return;
+    }
 
     const serviceChannel = AndroidNotificationChannel(
       _serviceChannelId,
@@ -193,13 +375,17 @@ class PushNotificationService {
       importance: Importance.low,
     );
 
-    final androidPlugin = _localNotifications
-        .resolvePlatformSpecificImplementation<
+    final androidPlugin =
+    _localNotifications.resolvePlatformSpecificImplementation<
         AndroidFlutterLocalNotificationsPlugin>();
+
     await androidPlugin?.createNotificationChannel(serviceChannel);
 
     final service = FlutterBackgroundService();
-    if (await service.isRunning()) return;
+
+    if (await service.isRunning()) {
+      return;
+    }
 
     await service.configure(
       androidConfiguration: AndroidConfiguration(
@@ -211,21 +397,27 @@ class PushNotificationService {
         notificationChannelId: _serviceChannelId,
         initialNotificationTitle: 'Сборка заказов активна',
         initialNotificationContent: 'Синхронизация заказов...',
-        foregroundServiceTypes: [AndroidForegroundType.dataSync],
+        foregroundServiceTypes: [
+          AndroidForegroundType.dataSync,
+        ],
       ),
-      iosConfiguration: IosConfiguration(autoStart: false),
+      iosConfiguration: IosConfiguration(
+        autoStart: false,
+      ),
     );
 
     await service.startService();
   }
 
   void stopForegroundService() {
-    if (!Platform.isAndroid) return;
+    if (!Platform.isAndroid) {
+      return;
+    }
+
     FlutterBackgroundService().invoke('stopService');
   }
 }
 
-// Callback должен быть вне класса и не внутри _showLocalNotification().
 @pragma('vm:entry-point')
 Future<void> onOrdersServiceStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
@@ -235,17 +427,18 @@ Future<void> onOrdersServiceStart(ServiceInstance service) async {
   });
 
   try {
-    await Firebase.initializeApp(
-      options: DefaultFirebaseOptions.currentPlatform,
-    );
+    if (Firebase.apps.isEmpty) {
+      await Firebase.initializeApp(
+        options: DefaultFirebaseOptions.currentPlatform,
+      );
+    }
 
-    // Это разовое получение токена, а не механизм доставки FCM-сообщений.
-    final token = await FirebaseMessaging.instance.getToken();
-    debugPrint('[BG Service] FCM токен: $token');
+    debugPrint('[BG Service] Firebase инициализирован');
   } catch (e) {
     debugPrint('[BG Service] Ошибка Firebase: $e');
   }
 
-  // TODO: Если нужен foreground service, добавьте здесь реальную
-  // продолжительную работу. Для ожидания пушей FCM сервис не нужен.
+  // Здесь нет повторных напоминаний.
+  // Если foreground service действительно используется,
+  // его задачу синхронизации нужно реализовать отдельно.
 }
