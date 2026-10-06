@@ -9,9 +9,6 @@ import 'core/services/push_notification_service.dart';
 import 'core/services/background_service.dart';
 import 'firebase_options.dart';
 
-/// Обработчик фоновых push-сообщений (когда приложение закрыто)
-///
-/// ВАЖНО: top-level функция с @pragma — выполняется в отдельном изоляте
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   // Инициализация Firebase в фоновом изоляте (обязательно!)

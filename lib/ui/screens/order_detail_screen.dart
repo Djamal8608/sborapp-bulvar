@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:sborapps/core/services/api_service.dart';
 import 'package:sborapps/core/order_state_provider.dart';
@@ -22,10 +24,19 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   bool _isInitialLoading = true;
   String? _loadError;
 
+  final Map<int, Timer> _countTimers = {};
+  final Map<int, int> _pendingCounts = {};
+
   @override
   void initState() {
     super.initState();
     _loadOrder();
+  }
+
+  @override
+  void dispose() {
+    _flushCounts();
+    super.dispose();
   }
 
   Future<void> _loadOrder() async {
@@ -232,8 +243,139 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     }
   }
 
+  void _applyLocalCount(int itemId, int count, {bool confirm = false}) {
+    final index = _items.indexWhere((e) => e.id == itemId);
+    if (index == -1) return;
+
+    final current = _items[index];
+    final full = count >= current.orderedPieces;
+    final partial = confirm && count > 0 && !full;
+
+    setState(() {
+      _items[index] = current.copyWith(
+        pickedCount: count,
+        isCollected: full || partial,
+        isUnavailable: false,
+        collectedQuantity: partial ? count.toDouble() : null,
+        resetCollectedQuantity: !partial,
+      );
+    });
+  }
+
+  void _changeCount(OrderItem item, int delta) {
+    final index = _items.indexWhere((e) => e.id == item.id);
+    if (index == -1) return;
+
+    final current = _items[index];
+    final next = (current.countedPieces + delta).clamp(0, current.orderedPieces);
+    if (next == current.countedPieces) return;
+
+    _applyLocalCount(item.id, next);
+
+    _countTimers[item.id]?.cancel();
+    _pendingCounts[item.id] = next;
+    _countTimers[item.id] = Timer(const Duration(milliseconds: 500), () {
+      _countTimers.remove(item.id);
+      final pending = _pendingCounts.remove(item.id);
+      if (pending != null) _sendCount(item.id, pending);
+    });
+  }
+
+  void _setCountNow(OrderItem item, int count, {bool confirm = false}) {
+    _countTimers.remove(item.id)?.cancel();
+    _pendingCounts.remove(item.id);
+
+    _applyLocalCount(item.id, count, confirm: confirm);
+    _sendCount(item.id, count, confirm: confirm);
+  }
+
+  void _flushCounts() {
+    for (final timer in _countTimers.values) {
+      timer.cancel();
+    }
+    _countTimers.clear();
+
+    final pending = Map<int, int>.from(_pendingCounts);
+    _pendingCounts.clear();
+    pending.forEach((itemId, count) => _sendCount(itemId, count));
+  }
+
+  Future<void> _sendCount(int itemId, int count, {bool confirm = false}) async {
+    final order = _order;
+    if (order == null) return;
+
+    try {
+      final amounts = await ApiService.setItemCount(
+        order.id,
+        itemId,
+        count,
+        confirm: confirm,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _order = _order?.copyWith(
+          totalPrice: amounts.totalPrice,
+          originalTotalPrice: amounts.originalTotalPrice,
+          removedTotal: amounts.removedTotal,
+          refundDue: amounts.refundDue,
+          unavailableCount: amounts.unavailableCount,
+        );
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Ошибка: $e'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      await _loadOrder();
+    }
+  }
+
+  Future<void> _confirmPartial(OrderItem item) async {
+    final count = item.countedPieces;
+    final total = item.orderedPieces;
+    final missing = total - count;
+    if (count <= 0 || missing <= 0) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Отдать $count из $total шт?'),
+        content: Text(
+          '«${item.productName}»: не хватило $missing шт.\n\n'
+              'Сумма заказа уменьшится на ${(item.price * missing).toStringAsFixed(2)} ₽, '
+              'клиент увидит это в своём приложении.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отмена'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.orange[700],
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Отдать $count шт'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+    _setCountNow(item, count, confirm: true);
+  }
+
   Future<void> _openScanner() async {
     if (_order == null) return;
+
+    _flushCounts();
 
     await Navigator.push(
       context,
@@ -268,9 +410,23 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       final index = _items.indexWhere((e) => e.id == result.itemId);
       if (index != -1) {
         setState(() {
-          _items[index] = _items[index].copyWith(isCollected: true);
+          final current = _items[index];
+          _items[index] = result.pickedCount != null
+              ? current.copyWith(
+                  pickedCount: result.pickedCount,
+                  isCollected: result.completed || current.isCollected,
+                  isUnavailable: false,
+                )
+              : current.copyWith(isCollected: true);
         });
       }
+    }
+
+    if (!result.already && result.pickedCount != null && !result.completed) {
+      return ScanFeedback(
+        ok: true,
+        text: '${result.productName} — ${result.pickedCount} из ${result.quantity.round()} шт',
+      );
     }
 
     final suffix = ' — собрано ${result.collectedCount} из ${result.itemsCount}';
@@ -1099,7 +1255,9 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         value: item.isCollected,
         onChanged: (missing || locked)
             ? null
-            : (value) => _updateItemStatus(item, value ?? false),
+            : item.isCountable
+                ? (value) => _setCountNow(item, value == true ? item.orderedPieces : 0)
+                : (value) => _updateItemStatus(item, value ?? false),
         activeColor: Colors.green,
       ),
       title: Text(
@@ -1150,8 +1308,8 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             ),
           if (!locked && !missing && item.isWeighted)
             _buildWeightRow(item),
-          if (!locked && !missing && !item.isWeighted && item.quantity > 1)
-            _buildQuantityStepper(item),
+          if (!locked && !missing && item.isCountable)
+            _buildCountRow(item),
         ],
       ),
       trailing: locked
@@ -1167,34 +1325,72 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     );
   }
 
-  /// Сколько штук нашлось. Минус доводит до нуля — это то же самое,
-  /// что «нет в наличии», поэтому отдельного подтверждения там не нужно.
-  Widget _buildQuantityStepper(OrderItem item) {
-    final picked = item.pickedQuantity;
+  Widget _buildCountRow(OrderItem item) {
+    final counted = item.countedPieces;
+    final total = item.orderedPieces;
+    final full = counted >= total;
+    final confirmedPartial = item.isCollected && item.isPartial;
+    final color = full
+        ? Colors.green
+        : (confirmedPartial ? Colors.orange : Colors.blue);
 
     return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Row(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Нашли:', style: TextStyle(fontSize: 12)),
-          const SizedBox(width: 4),
-          _stepperButton(
-            icon: Icons.remove,
-            onTap: picked > 0 ? () => _setQuantity(item, picked - 1) : null,
+          Row(
+            children: [
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: LinearProgressIndicator(
+                    value: total > 0 ? counted / total : 0,
+                    minHeight: 8,
+                    backgroundColor: Colors.grey[300],
+                    valueColor: AlwaysStoppedAnimation(color),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                '$counted из $total',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: full ? Colors.green[700] : null,
+                ),
+              ),
+            ],
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            child: Text(
-              '${picked.round()} из ${item.quantity.round()}',
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          if (!item.isCollected) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                _stepperButton(
+                  icon: Icons.remove,
+                  onTap: counted > 0 ? () => _changeCount(item, -1) : null,
+                ),
+                const SizedBox(width: 10),
+                _stepperButton(
+                  icon: Icons.add,
+                  onTap: counted < total ? () => _changeCount(item, 1) : null,
+                ),
+                const Spacer(),
+                if (counted > 0 && counted < total)
+                  OutlinedButton(
+                    onPressed: () => _confirmPartial(item),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.orange[800],
+                      side: BorderSide(color: Colors.orange[300]!),
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                    ),
+                    child: Text('Отдать $counted шт'),
+                  ),
+              ],
             ),
-          ),
-          _stepperButton(
-            icon: Icons.add,
-            onTap: picked < item.quantity
-                ? () => _setQuantity(item, picked + 1)
-                : null,
-          ),
+          ],
         ],
       ),
     );
@@ -1301,8 +1497,8 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       onTap: onTap,
       borderRadius: BorderRadius.circular(6),
       child: Container(
-        width: 32,
-        height: 32,
+        width: 40,
+        height: 40,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(6),
           border: Border.all(
@@ -1311,7 +1507,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         ),
         child: Icon(
           icon,
-          size: 18,
+          size: 22,
           color: onTap == null ? Colors.grey[400] : Colors.black87,
         ),
       ),

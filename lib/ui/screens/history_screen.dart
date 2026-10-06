@@ -230,20 +230,181 @@ class _HistoryScreenState extends State<HistoryScreen> {
             );
           }
 
-          return HistoryOrderCard(order: _orders[index]);
+          return HistoryOrderCard(
+            key: ValueKey(_orders[index].id),
+            order: _orders[index],
+          );
         },
       ),
     );
   }
 }
 
-class HistoryOrderCard extends StatelessWidget {
+class HistoryOrderCard extends StatefulWidget {
   final Order order;
 
   const HistoryOrderCard({Key? key, required this.order}) : super(key: key);
 
   @override
+  State<HistoryOrderCard> createState() => _HistoryOrderCardState();
+}
+
+class _HistoryOrderCardState extends State<HistoryOrderCard> {
+  bool _expanded = false;
+  Future<Order>? _details;
+
+  void _toggle() {
+    setState(() {
+      _expanded = !_expanded;
+      _details ??= ApiService.getOrderDetail(widget.order.id);
+    });
+  }
+
+  void _reload() {
+    setState(() {
+      _details = ApiService.getOrderDetail(widget.order.id);
+    });
+  }
+
+  Widget _buildItems() {
+    return FutureBuilder<Order>(
+      future: _details,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 12),
+            child: Center(
+              child: SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          );
+        }
+
+        if (snapshot.hasError || snapshot.data == null) {
+          return Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Не удалось загрузить состав заказа',
+                  style: TextStyle(fontSize: 13, color: Colors.red[700]),
+                ),
+              ),
+              TextButton(
+                onPressed: _reload,
+                child: const Text('Повторить'),
+              ),
+            ],
+          );
+        }
+
+        final details = snapshot.data!;
+        final items = details.items;
+        if (items.isEmpty) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Text(
+              'В заказе нет позиций',
+              style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+            ),
+          );
+        }
+
+        final reduced = details.originalTotalPrice - details.totalPrice;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (var i = 0; i < items.length; i++) ...[
+              if (i > 0) const Divider(height: 1),
+              _buildItemRow(items[i]),
+            ],
+            if (reduced > 0.009) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Сумма уменьшена на ${reduced.toStringAsFixed(2)} ₽: '
+                    'было ${details.originalTotalPrice.toStringAsFixed(2)} ₽',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.orange[800],
+                ),
+              ),
+            ],
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildItemRow(OrderItem item) {
+    final missing = item.isUnavailable;
+    final partial = item.isPartial;
+    final picked = item
+        .quantityText(item.pickedQuantity)
+        .replaceAll(RegExp(r' (шт|кг)$'), '');
+
+    final String quantity;
+    final Color quantityColor;
+    if (missing) {
+      quantity = 'нет в наличии';
+      quantityColor = Colors.red[700]!;
+    } else if (partial) {
+      quantity = '$picked из ${item.quantityText(item.quantity)}';
+      quantityColor = Colors.orange[800]!;
+    } else {
+      quantity = item.quantityText(item.quantity);
+      quantityColor = Colors.grey[700]!;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item.productName,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: missing ? Colors.grey : null,
+                    decoration: missing
+                        ? TextDecoration.lineThrough
+                        : TextDecoration.none,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  quantity,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: (missing || partial)
+                        ? FontWeight.w600
+                        : FontWeight.normal,
+                    color: quantityColor,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            missing ? '—' : '${item.subtotal.toStringAsFixed(2)} ₽',
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final order = widget.order;
     final isDelivered = order.deliveryStatus == 'delivered';
     final isCanceled = order.deliveryStatus == 'canceled';
 
@@ -424,6 +585,35 @@ class HistoryOrderCard extends StatelessWidget {
                 ),
               ],
             ),
+            const SizedBox(height: 8),
+            InkWell(
+              onTap: _toggle,
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  children: [
+                    Icon(Icons.list_alt, size: 18, color: Colors.blue[700]),
+                    const SizedBox(width: 6),
+                    Text(
+                      _expanded ? 'Скрыть состав' : 'Состав заказа',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.blue[700],
+                      ),
+                    ),
+                    const Spacer(),
+                    AnimatedRotation(
+                      turns: _expanded ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 200),
+                      child: Icon(Icons.expand_more, color: Colors.blue[700]),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (_expanded) _buildItems(),
           ],
         ),
       ),

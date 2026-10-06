@@ -246,6 +246,37 @@ class ApiService {
     }
   }
 
+  static Future<OrderAmounts> setItemCount(
+      int orderId,
+      int itemId,
+      int count, {
+        bool confirm = false,
+      }) async {
+    try {
+      final headers = await _buildHeaders();
+      final response = await http.post(
+        Uri.parse('$_baseUrl/orders_api.php?action=set_item_count'),
+        headers: headers,
+        body: jsonEncode({
+          'order_id': orderId,
+          'item_id': itemId,
+          'count': count,
+          'confirm': confirm,
+        }),
+      ).timeout(_timeout);
+
+      await _checkResponse(response);
+
+      return OrderAmounts.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>,
+      );
+    } on ApiException {
+      rethrow;
+    } catch (e) {
+      throw ApiException('Нет соединения с сервером: $e');
+    }
+  }
+
   /// Пробить чек на виртуальной кассе mobile (для наличной оплаты).
   /// После этого синхронизатор 1С отправит чек на физическую кассу —
   /// она распечатает его.
@@ -487,6 +518,9 @@ class ScanResult {
   final int itemsCount;
   final int collectedCount;
   final int progress;
+  final double quantity;
+  final int? pickedCount;
+  final bool completed;
 
   const ScanResult({
     required this.found,
@@ -498,9 +532,14 @@ class ScanResult {
     required this.itemsCount,
     required this.collectedCount,
     required this.progress,
+    this.quantity = 0,
+    this.pickedCount,
+    this.completed = true,
   });
 
   factory ScanResult.fromJson(Map<String, dynamic> json) {
+    final picked = json['picked_count'];
+
     return ScanResult(
       found: json['found'] == true,
       already: json['already'] == true,
@@ -512,6 +551,9 @@ class ScanResult {
       collectedCount:
       json['collected_count'] is int ? json['collected_count'] as int : 0,
       progress: json['progress'] is int ? json['progress'] as int : 0,
+      quantity: _parseDouble(json['quantity']),
+      pickedCount: picked == null ? null : _parseDouble(picked).round(),
+      completed: json['completed'] != false,
     );
   }
 }
@@ -828,6 +870,8 @@ class OrderItem {
 
   final String unit;
 
+  final int? pickedCount;
+
   const OrderItem({
     this.id = 0,
     required this.productId,
@@ -838,9 +882,20 @@ class OrderItem {
     this.isUnavailable = false,
     this.collectedQuantity,
     this.unit = 'шт',
+    this.pickedCount,
   });
 
   bool get isWeighted => unit == 'кг';
+
+  bool get isCountable => !isWeighted && quantity > 1;
+
+  int get orderedPieces => quantity.round();
+
+  int get countedPieces {
+    if (isUnavailable) return 0;
+    if (isCollected) return pickedQuantity.round();
+    return (pickedCount ?? 0).clamp(0, orderedPieces);
+  }
 
   double get pickedQuantity => isUnavailable ? 0 : (collectedQuantity ?? quantity);
 
@@ -866,6 +921,7 @@ class OrderItem {
 
   factory OrderItem.fromJson(Map<String, dynamic> json) {
     final raw = json['collected_quantity'];
+    final picked = json['picked_count'];
 
     return OrderItem(
       id: json['id'] ?? 0,
@@ -877,6 +933,7 @@ class OrderItem {
       isUnavailable: json['is_unavailable'] ?? false,
       collectedQuantity: raw == null ? null : _parseDouble(raw),
       unit: json['unit']?.toString() == 'кг' ? 'кг' : 'шт',
+      pickedCount: picked == null ? null : _parseDouble(picked).round(),
     );
   }
 
@@ -890,6 +947,8 @@ class OrderItem {
     bool? isUnavailable,
     double? collectedQuantity,
     bool resetCollectedQuantity = false,
+    int? pickedCount,
+    bool resetPickedCount = false,
   }) {
     return OrderItem(
       id: id ?? this.id,
@@ -903,6 +962,7 @@ class OrderItem {
           ? null
           : (collectedQuantity ?? this.collectedQuantity),
       unit: unit,
+      pickedCount: resetPickedCount ? null : (pickedCount ?? this.pickedCount),
     );
   }
 }

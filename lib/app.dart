@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:sborapps/core/services/admin_auth_service.dart';
+import 'package:sborapps/core/services/app_update_service.dart';
+import 'ui/widgets/app_update_dialog.dart';
 import 'ui/screens/orders_screen.dart';
 import 'ui/screens/history_screen.dart';
-import 'ui/screens/scheduled_orders_screen.dart';
+// import 'ui/screens/scheduled_orders_screen.dart';
 import 'ui/screens/profile_screen.dart';
 import 'ui/drawer/admin_login_screen.dart';
 import 'ui/drawer/picker_drawer.dart';
@@ -121,26 +125,63 @@ class MainScaffold extends StatefulWidget {
 }
 
 class _MainScaffoldState extends State<MainScaffold>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabController;
   int _selectedIndex = 0;
   String pickerName = 'Сборщик заказов';
+  Timer? _updateTimer;
+  bool _updateBusy = false;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: _tabTitles.length, vsync: this);
     _tabController.addListener(() {
       if (_tabController.index != _selectedIndex) {
         setState(() => _selectedIndex = _tabController.index);
       }
     });
+
+    if (AppUpdateService.isSupported) {
+      WidgetsBinding.instance.addObserver(this);
+      _updateTimer = Timer.periodic(
+        const Duration(minutes: 15),
+        (_) => _checkForUpdate(),
+      );
+      _checkForUpdate();
+    }
   }
 
-  static const List<String> _tabTitles = ['Заказы', 'Запланированные', 'История'];
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _checkForUpdate();
+  }
+
+  Future<void> _checkForUpdate() async {
+    if (_updateBusy) return;
+    _updateBusy = true;
+    try {
+      final update = await AppUpdateService.check();
+      if (update != null && mounted) {
+        await AppUpdateDialog.show(context, update);
+      }
+    } catch (e) {
+      debugPrint('[Update] $e');
+    } finally {
+      _updateBusy = false;
+    }
+  }
+
+  static const List<String> _tabTitles = [
+    'Заказы',
+    // 'Запланированные',
+    'История',
+  ];
 
   @override
   void dispose() {
+    _updateTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _tabController.dispose();
     super.dispose();
   }
@@ -173,7 +214,7 @@ class _MainScaffoldState extends State<MainScaffold>
           });
         },
         onOrdersTap: () => _switchToTab(0),
-        onHistoryTap: () => _switchToTab(2),
+        onHistoryTap: () => _switchToTab(_tabTitles.indexOf('История')),
         onProfileTap: () {
           Navigator.pop(context);
           Navigator.of(context).pushNamed('/profile');
@@ -262,7 +303,7 @@ class _MainScaffoldState extends State<MainScaffold>
                     labelPadding: EdgeInsets.zero,
                     tabs: [
                       _buildTab(Icons.list_alt, 'Заказы', showTabText, isVerySmallHeight),
-                      _buildTab(Icons.schedule, 'Запланированные', showTabText, isVerySmallHeight),
+                      // _buildTab(Icons.schedule, 'Запланированные', showTabText, isVerySmallHeight),
                       _buildTab(Icons.history, 'История', showTabText, isVerySmallHeight),
                     ],
                   ),
@@ -276,7 +317,7 @@ class _MainScaffoldState extends State<MainScaffold>
         controller: _tabController,
         children: const [
           OrdersScreen(),
-          ScheduledOrdersScreen(),
+          // ScheduledOrdersScreen(),
           HistoryScreen(),
         ],
       ),
