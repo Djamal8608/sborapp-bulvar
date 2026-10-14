@@ -577,11 +577,73 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     );
 
     if (confirmed != true) return;
+    await _submitCancel(order);
+  }
 
+  bool get _canCancel {
+    final status = _order?.status;
+    if (status == null || _isLoading) return false;
+    return status == 'scheduled' || _editable.contains(status);
+  }
+
+  String _cancelMoneyNote(Order order) {
+    if (order.isHeld) {
+      return '\n\nБлокировка на карте клиента снимется, деньги вернутся ему.';
+    }
+    if (order.isChargeOnPack || order.isAwaitingPayment) {
+      return '\n\nДеньги с клиента не списывались.';
+    }
+    if (order.isPaidOnline) {
+      return '\n\nЗаказ оплачен онлайн — возврат '
+          '${order.originalTotalPrice.toStringAsFixed(2)} ₽ оформляет магазин.';
+    }
+    return '';
+  }
+
+  Future<void> _cancelByClient() async {
+    final order = _order;
+    if (order == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Отменить заказ #${order.id}?'),
+        content: Text(
+          'Клиент попросил отменить заказ. Он уйдёт в историю, '
+              'клиент увидит статус «Отменён».${_cancelMoneyNote(order)}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Назад'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Отменить заказ'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+    await _submitCancel(order);
+  }
+
+  Future<void> _submitCancel(Order order) async {
     setState(() => _isLoading = true);
 
     try {
       await ApiService.updateOrderStatus(order.id, 'canceled');
+
+      for (final timer in _countTimers.values) {
+        timer.cancel();
+      }
+      _countTimers.clear();
+      _pendingCounts.clear();
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -677,6 +739,24 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             onPressed: _loadOrder,
             tooltip: 'Обновить',
           ),
+          if (_canCancel)
+            PopupMenuButton<String>(
+              onSelected: (value) {
+                if (value == 'cancel') _cancelByClient();
+              },
+              itemBuilder: (context) => const [
+                PopupMenuItem(
+                  value: 'cancel',
+                  child: Row(
+                    children: [
+                      Icon(Icons.cancel_outlined, color: Colors.red),
+                      SizedBox(width: 12),
+                      Text('Отменить заказ', style: TextStyle(color: Colors.red)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
         ],
       ),
       body: LayoutBuilder(
